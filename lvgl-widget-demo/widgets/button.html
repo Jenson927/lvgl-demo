@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LVGL Button 复刻与导出</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='3' y='8' width='26' height='16' rx='6' fill='%232b7de9'/%3E%3Crect x='10' y='15' width='12' height='2.5' rx='1.25' fill='%23fff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="../assets/panel.css">
+<style>
+  /* 仅本页需要的极小补充：把 LVGL 接口名单独放一行 */
+  .field label{flex-wrap:wrap;row-gap:2px}
+  .field label .api{order:3;flex-basis:100%;font-family:var(--mono);font-size:11px;color:var(--ink-3);line-height:1.5}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>LVGL Button 本地复刻</h1>
+    <p>四种状态（默认 / 按下 / 勾选 / 禁用）、尺寸、圆角、内边距与投影实时可调，参数对齐 <code>lv_obj_add_state()</code> 与 <code>lv_obj_set_style_*</code> 系列接口，可直接导出 GIF / WebM 留档。</p>
+  </header>
+
+  <div class="stage">
+    <div class="stage-canvas-box"><canvas id="view"></canvas></div>
+  </div>
+
+  <section class="panel">
+    <h2>参数（对应 LVGL 接口）</h2>
+    <div class="grid">
+      <div class="field wide">
+        <label>状态 state<span class="api">lv_obj_add_state(btn, LV_STATE_PRESSED / CHECKED / DISABLED)</span></label>
+        <div class="seg" id="mode">
+          <button type="button" data-v="default" class="active">默认</button>
+          <button type="button" data-v="pressed">按下</button>
+          <button type="button" data-v="checked">勾选</button>
+          <button type="button" data-v="disabled">禁用</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>宽度 width<output id="o-w">140 px</output><span class="api">lv_obj_set_width</span></label>
+        <input type="range" id="w" min="80" max="240" step="1" value="140">
+      </div>
+      <div class="field">
+        <label>高度 height<output id="o-h">48 px</output><span class="api">lv_obj_set_height</span></label>
+        <input type="range" id="h" min="36" max="80" step="1" value="48">
+      </div>
+
+      <div class="field">
+        <label>圆角 radius<output id="o-radius">22 %</output><span class="api">lv_obj_set_style_radius</span></label>
+        <input type="range" id="radius" min="0" max="100" step="1" value="22">
+      </div>
+      <div class="field">
+        <label>水平内边距 pad_hor<output id="o-padh">18 px</output><span class="api">lv_obj_set_style_pad_hor</span></label>
+        <input type="range" id="padh" min="0" max="60" step="1" value="18">
+      </div>
+
+      <div class="field">
+        <label>背景色 bg_color<output id="o-bg">#4a5563</output><span class="api">lv_obj_set_style_bg_color</span></label>
+        <input type="color" id="bg" value="#4a5563">
+      </div>
+      <div class="field">
+        <label>文字色 text_color<output id="o-text">#ffffff</output><span class="api">lv_obj_set_style_text_color</span></label>
+        <input type="color" id="text" value="#ffffff">
+      </div>
+
+      <div class="field">
+        <label>阴影 shadow<span class="api">lv_obj_set_style_shadow_width</span></label>
+        <div class="check"><input type="checkbox" id="shadow" checked><span>开启投影</span></div>
+      </div>
+      <div class="field">
+        <label>自动演示<span class="api">约 1.2 s 轮换：默认 → 按下 → 勾选</span></label>
+        <div class="check"><input type="checkbox" id="auto"><span>自动循环三种状态</span></div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button type="button" class="btn primary" id="btn-gif">导出 GIF（一轮三态）</button>
+      <button type="button" class="btn" id="btn-webm">录制 WebM（一轮三态）</button>
+    </div>
+    <div class="status" id="status"></div>
+  </section>
+
+  <pre class="code" id="code"></pre>
+
+  <footer>GIF 编码由 gif.js（jsDelivr CDN）完成，需联网；WebM 使用浏览器原生 MediaRecorder，离线可用。点击画布上的按钮可在「默认 / 勾选」之间切换。</footer>
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  var state = {
+    mode: "default",   // default | pressed | checked | disabled
+    w: 140,
+    h: 48,
+    radius: 22,        // 百分比，100% = LV_RADIUS_CIRCLE
+    padh: 18,
+    bg: "#4a5563",
+    text: "#ffffff",
+    shadow: true,
+    auto: false
+  };
+
+  var STAGE_W = 360;          // 舞台逻辑尺寸（导出画布同尺寸）
+  var STAGE_H = 220;
+  var ACCENT = "#2b7de9";     // 勾选态使用的主色
+  var STEP = 1200;            // 自动演示每个状态停留时间
+  var FAMILY = '-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif';
+
+  var canvas = document.getElementById("view");
+  var ctx = canvas.getContext("2d");
+  var statusEl = document.getElementById("status");
+  var autoEl = document.getElementById("auto");
+  var t0 = performance.now();
+  var lastAuto = null;
+
+  /* ---------- 工具 ---------- */
+  function clamp(v, a, b){ return Math.max(a, Math.min(b, v)); }
+
+  function roundRect(c, x, y, w, h, r){
+    r = Math.min(r, w / 2, h / 2);
+    if(r < 0) r = 0;
+    c.beginPath();
+    c.moveTo(x + r, y);
+    c.arcTo(x + w, y, x + w, y + h, r);
+    c.arcTo(x + w, y + h, x, y + h, r);
+    c.arcTo(x, y + h, x, y, r);
+    c.arcTo(x, y, x + w, y, r);
+    c.closePath();
+  }
+
+  function rgbOf(hex){
+    var h = hex.replace("#", "");
+    return [parseInt(h.substr(0, 2), 16), parseInt(h.substr(2, 2), 16), parseInt(h.substr(4, 2), 16)];
+  }
+
+  function shade(hex, k){
+    var c = rgbOf(hex);
+    return "rgb(" + Math.round(c[0] * (1 - k)) + "," + Math.round(c[1] * (1 - k)) + "," + Math.round(c[2] * (1 - k)) + ")";
+  }
+
+  function mix(hex, hex2, t){
+    var a = rgbOf(hex), b = rgbOf(hex2);
+    return "rgb(" + Math.round(a[0] + (b[0] - a[0]) * t) + "," +
+                    Math.round(a[1] + (b[1] - a[1]) * t) + "," +
+                    Math.round(a[2] + (b[2] - a[2]) * t) + ")";
+  }
+
+  /* 圆角百分比 → 像素，100% 即 LV_RADIUS_CIRCLE */
+  function radiusPx(){
+    return (state.radius / 100) * Math.min(state.w, state.h) / 2;
+  }
+
+  /* 自动演示某时刻的状态 */
+  function stateAt(tMs){
+    if(!state.auto) return state.mode;
+    var seq = ["default", "pressed", "checked"];
+    return seq[Math.floor(tMs / STEP) % seq.length];
+  }
+
+  function colorsOf(mode){
+    var bg = state.bg;
+    var fg = state.text;
+    if(mode === "pressed"){
+      bg = shade(state.bg, 0.18);
+    }else if(mode === "checked"){
+      bg = ACCENT;
+    }else if(mode === "disabled"){
+      bg = mix(state.bg, "#ffffff", 0.62);
+      fg = mix(state.text, "#ffffff", 0.55);
+    }
+    return { bg: bg, fg: fg };
+  }
+
+  function fitText(c, txt, maxW){
+    if(c.measureText(txt).width <= maxW) return txt;
+    var n = txt.length - 1;
+    while(n > 0 && c.measureText(txt.slice(0, n) + "…").width > maxW) n--;
+    return n > 0 ? txt.slice(0, n) + "…" : "";
+  }
+
+  function drawCheck(c, x, y, fs, color){
+    c.save();
+    c.strokeStyle = color;
+    c.lineWidth = Math.max(2, fs * 0.11);
+    c.lineCap = "round";
+    c.lineJoin = "round";
+    c.beginPath();
+    c.moveTo(x - fs * 0.26, y + fs * 0.02);
+    c.lineTo(x - fs * 0.07, y + fs * 0.21);
+    c.lineTo(x + fs * 0.29, y - fs * 0.21);
+    c.stroke();
+    c.restore();
+  }
+
+  /* ---------- 绘制 ---------- */
+  function draw(c, tMs){
+    c.clearRect(0, 0, STAGE_W, STAGE_H);
+
+    var mode = stateAt(tMs);
+    var col = colorsOf(mode);
+    var w = state.w, h = state.h;
+    var r = radiusPx();
+    var cx = STAGE_W / 2;
+    var cy = STAGE_H / 2 + (mode === "pressed" ? 1 : 0);   // 按下时下沉 1px
+    var x = cx - w / 2, y = cy - h / 2;
+
+    /* 投影 */
+    if(state.shadow && mode !== "disabled"){
+      c.save();
+      c.shadowColor = "rgba(26,38,56,0.32)";
+      c.shadowBlur = mode === "pressed" ? 6 : 14;
+      c.shadowOffsetY = mode === "pressed" ? 1 : 5;
+      roundRect(c, x, y, w, h, r);
+      c.fillStyle = col.bg;
+      c.fill();
+      c.restore();
+    }
+
+    roundRect(c, x, y, w, h, r);
+    c.fillStyle = col.bg;
+    c.fill();
+
+    /* 勾选态加一圈轻微内描边，强调选中 */
+    if(mode === "checked"){
+      roundRect(c, x + 1.5, y + 1.5, w - 3, h - 3, Math.max(0, r - 1.5));
+      c.strokeStyle = "rgba(255,255,255,0.30)";
+      c.lineWidth = 2;
+      c.stroke();
+    }
+
+    /* 文字（超出内边距时省略） */
+    var fs = clamp(Math.round(h * 0.36), 12, 26);
+    var fontStr = "600 " + fs + "px " + FAMILY;
+    c.font = fontStr;
+    c.textBaseline = "middle";
+    c.textAlign = "left";
+
+    var txt = "Button";
+    var innerW = Math.max(0, w - 2 * state.padh);
+    var showCheck = mode === "checked";
+    var gap = showCheck ? 6 : 0;
+    var checkW = showCheck ? Math.round(fs * 0.8) : 0;
+    var avail = Math.max(0, innerW - checkW - gap);
+
+    if(showCheck && avail < fs * 1.6){
+      showCheck = false;
+      checkW = 0;
+      gap = 0;
+      avail = innerW;
+    }
+
+    if(c.measureText(txt).width > avail) txt = fitText(c, txt, avail);
+    var tw = c.measureText(txt).width;
+    var startX = cx - (checkW + gap + tw) / 2;
+
+    c.save();
+    c.beginPath();
+    c.rect(x + state.padh, y, innerW, h);
+    c.clip();
+    if(showCheck) drawCheck(c, startX + checkW / 2, cy, fs, col.fg);
+    c.fillStyle = col.fg;
+    c.fillText(txt, startX + checkW + gap, cy);
+    c.restore();
+  }
+
+  /* ---------- 高清适配 + 主循环 ---------- */
+  function fitCanvas(){
+    var dpr = window.devicePixelRatio || 1;
+    canvas.width = STAGE_W * dpr;
+    canvas.height = STAGE_H * dpr;
+    canvas.style.width = STAGE_W + "px";
+    canvas.style.height = STAGE_H + "px";
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    canvas.style.cursor = "pointer";
+  }
+
+  function setSeg(id, value){
+    var el = document.getElementById(id);
+    var btns = el.getElementsByTagName("button");
+    for(var i = 0; i < btns.length; i++){
+      btns[i].className = btns[i].getAttribute("data-v") === value ? "active" : "";
+    }
+  }
+
+  function loop(now){
+    var t = now - t0;
+    draw(ctx, t);
+    if(state.auto){
+      var s = stateAt(t);
+      if(s !== lastAuto){ setSeg("mode", s); lastAuto = s; }
+    }
+    requestAnimationFrame(loop);
+  }
+
+  /* ---------- 等价 C 代码 ---------- */
+  function renderCode(){
+    var hex = function(c){ return "0x" + c.replace("#", ""); };
+    var rp = Math.round(radiusPx());
+    var arg = state.radius >= 100 ? "LV_RADIUS_CIRCLE" : rp;
+    var L = [];
+
+    L.push('<span class="cm">/* 由页面参数实时生成 */</span>');
+    L.push('lv_obj_t * btn = <span class="fn">lv_button_create</span>(lv_screen_active());');
+    L.push('<span class="fn">lv_obj_set_size</span>(btn, <span class="num">' + state.w + '</span>, <span class="num">' + state.h + '</span>);');
+    L.push('<span class="fn">lv_obj_center</span>(btn);');
+    L.push('<span class="fn">lv_obj_set_style_radius</span>(btn, <span class="num">' + arg + '</span>, LV_PART_MAIN);');
+    L.push('<span class="fn">lv_obj_set_style_pad_hor</span>(btn, <span class="num">' + state.padh + '</span>, LV_PART_MAIN);');
+    L.push('<span class="fn">lv_obj_set_style_bg_color</span>(btn, <span class="fn">lv_color_hex</span>(<span class="num">' + hex(state.bg) + '</span>), LV_PART_MAIN);');
+    L.push('<span class="fn">lv_obj_set_style_text_color</span>(btn, <span class="fn">lv_color_hex</span>(<span class="num">' + hex(state.text) + '</span>), LV_PART_MAIN);');
+
+    if(state.shadow){
+      L.push('<span class="fn">lv_obj_set_style_shadow_width</span>(btn, <span class="num">14</span>, LV_PART_MAIN);');
+      L.push('<span class="fn">lv_obj_set_style_shadow_offset_y</span>(btn, <span class="num">5</span>, LV_PART_MAIN);');
+      L.push('<span class="fn">lv_obj_set_style_shadow_opa</span>(btn, LV_OPA_30, LV_PART_MAIN);');
+    }else{
+      L.push('<span class="fn">lv_obj_set_style_shadow_width</span>(btn, <span class="num">0</span>, LV_PART_MAIN);');
+    }
+
+    if(state.mode === "checked"){
+      L.push('<span class="fn">lv_obj_add_state</span>(btn, LV_STATE_CHECKED);');
+      L.push('<span class="cm">/* 勾选态改用主题主色 */</span>');
+      L.push('<span class="fn">lv_obj_set_style_bg_color</span>(btn, <span class="fn">lv_color_hex</span>(<span class="num">' + hex(ACCENT) + '</span>), LV_PART_MAIN | LV_STATE_CHECKED);');
+    }else if(state.mode === "pressed"){
+      L.push('<span class="fn">lv_obj_add_state</span>(btn, LV_STATE_PRESSED);');
+    }else if(state.mode === "disabled"){
+      L.push('<span class="fn">lv_obj_add_state</span>(btn, LV_STATE_DISABLED);');
+    }
+
+    L.push('');
+    L.push('lv_obj_t * label = <span class="fn">lv_label_create</span>(btn);');
+    L.push('<span class="fn">lv_label_set_text</span>(label, "Button");');
+    L.push('<span class="fn">lv_obj_center</span>(label);');
+
+    document.getElementById("code").innerHTML = L.join("\n");
+  }
+
+  /* ---------- 控件绑定 ---------- */
+  function setStatus(msg, ok){
+    statusEl.textContent = msg;
+    statusEl.className = "status" + (ok ? " ok" : "");
+  }
+
+  function bindRange(id, key, outId, fmt){
+    var el = document.getElementById(id);
+    var out = document.getElementById(outId);
+    el.addEventListener("input", function(){
+      state[key] = Number(el.value);
+      out.textContent = fmt(Number(el.value));
+      renderCode();
+    });
+  }
+
+  bindRange("w",      "w",      "o-w",      function(v){ return v + " px"; });
+  bindRange("h",      "h",      "o-h",      function(v){ return v + " px"; });
+  bindRange("radius", "radius", "o-radius", function(v){ return v + " %"; });
+  bindRange("padh",   "padh",   "o-padh",   function(v){ return v + " px"; });
+
+  document.getElementById("bg").addEventListener("input", function(e){
+    state.bg = e.target.value;
+    document.getElementById("o-bg").textContent = state.bg;
+    renderCode();
+  });
+  document.getElementById("text").addEventListener("input", function(e){
+    state.text = e.target.value;
+    document.getElementById("o-text").textContent = state.text;
+    renderCode();
+  });
+  document.getElementById("shadow").addEventListener("change", function(e){
+    state.shadow = e.target.checked;
+    renderCode();
+  });
+  autoEl.addEventListener("change", function(e){
+    state.auto = e.target.checked;
+    lastAuto = null;
+    if(!state.auto) setSeg("mode", state.mode);
+  });
+
+  document.getElementById("mode").addEventListener("click", function(e){
+    var btn = e.target.closest ? e.target.closest("button") : null;
+    if(!btn || btn.parentNode !== this) return;
+    state.mode = btn.getAttribute("data-v");
+    state.auto = false;
+    autoEl.checked = false;
+    setSeg("mode", state.mode);
+    renderCode();
+  });
+
+  /* ---------- 画布点击切换勾选 ---------- */
+  canvas.addEventListener("click", function(e){
+    var rect = canvas.getBoundingClientRect();
+    var px = e.clientX - rect.left;
+    var py = e.clientY - rect.top;
+    if(px < STAGE_W / 2 - state.w / 2 || px > STAGE_W / 2 + state.w / 2) return;
+    if(py < STAGE_H / 2 - state.h / 2 || py > STAGE_H / 2 + state.h / 2) return;
+    state.mode = state.mode === "checked" ? "default" : "checked";
+    state.auto = false;
+    autoEl.checked = false;
+    setSeg("mode", state.mode);
+    renderCode();
+  });
+
+  /* ---------- 下载 ---------- */
+  function download(blob, name){
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function(){ URL.revokeObjectURL(a.href); }, 2000);
+  }
+
+  /* ---------- GIF 导出 ---------- */
+  var gifLib = null;
+  function loadGif(){
+    if(gifLib) return Promise.resolve(gifLib);
+    return new Promise(function(resolve, reject){
+      var s = document.createElement("script");
+      s.src = "https://fastly.jsdelivr.net/npm/gif.js@0.2.0/dist/gif.js";
+      s.onload = function(){ gifLib = window.GIF; resolve(gifLib); };
+      s.onerror = function(){ reject(new Error("gif.js 加载失败（需联网），可改用 WebM")); };
+      document.head.appendChild(s);
+    });
+  }
+
+  document.getElementById("btn-gif").addEventListener("click", function(){
+    var btn = this;
+    btn.disabled = true;
+    setStatus("加载 GIF 编码器…");
+    loadGif().then(function(GIF){
+      var fps = 20;
+      var cycle = STEP * 3;                       // 三态一轮
+      var frames = Math.max(2, Math.round(cycle / 1000 * fps));
+      var workerUrl = "https://fastly.jsdelivr.net/npm/gif.js@0.2.0/dist/gif.worker.js";
+      var gif = new GIF({ workers: 2, quality: 10, width: STAGE_W, height: STAGE_H, workerScript: workerUrl });
+      var off = document.createElement("canvas");
+      off.width = STAGE_W; off.height = STAGE_H;
+      var octx = off.getContext("2d");
+      var i = 0;
+      var prevAuto = state.auto;
+      state.auto = true;
+
+      function step(){
+        if(i < frames){
+          draw(octx, i / fps * 1000);
+          gif.addFrame(off, { delay: Math.round(1000 / fps), copy: true });
+          setStatus("渲染帧 " + (i + 1) + "/" + frames);
+          i++;
+          setTimeout(step, 0);
+        }else{
+          gif.on("finished", function(blob){
+            state.auto = prevAuto;
+            lastAuto = null;
+            if(!state.auto) setSeg("mode", state.mode);
+            download(blob, "button.gif");
+            setStatus("GIF 已保存：" + frames + " 帧 / " + fps + "fps", true);
+            btn.disabled = false;
+          });
+          gif.on("progress", function(p){ setStatus("编码 GIF " + Math.round(p * 100) + "%"); });
+          gif.render();
+        }
+      }
+      step();
+    }).catch(function(err){
+      setStatus(err.message);
+      btn.disabled = false;
+    });
+  });
+
+  /* ---------- WebM 录制（原生，离线可用） ---------- */
+  document.getElementById("btn-webm").addEventListener("click", function(){
+    var btn = this;
+    if(!canvas.captureStream || typeof MediaRecorder === "undefined"){
+      setStatus("当前浏览器不支持 MediaRecorder，请用 Chrome/Edge");
+      return;
+    }
+    btn.disabled = true;
+    var prevAuto = state.auto;
+    state.auto = true;
+    var cycle = STEP * 3;
+
+    var stream = canvas.captureStream(30);
+    var rec = new MediaRecorder(stream, { mimeType: "video/webm" });
+    var chunks = [];
+    rec.ondataavailable = function(e){ if(e.data.size) chunks.push(e.data); };
+    rec.onstop = function(){
+      state.auto = prevAuto;
+      lastAuto = null;
+      if(!state.auto) setSeg("mode", state.mode);
+      download(new Blob(chunks, { type: "video/webm" }), "button.webm");
+      setStatus("WebM 已保存（一轮三态 " + cycle + " ms）", true);
+      btn.disabled = false;
+    };
+    setStatus("录制中，约 " + Math.round(cycle / 1000) + " 秒…");
+    rec.start();
+    setTimeout(function(){ rec.stop(); }, cycle);
+  });
+
+  fitCanvas();
+  renderCode();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

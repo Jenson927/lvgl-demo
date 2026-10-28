@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LVGL Spinner 复刻与导出</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='12' fill='none' stroke='%23e3e6ea' stroke-width='4'/%3E%3Cpath d='M16 4 A12 12 0 0 1 27 20' fill='none' stroke='%232b7de9' stroke-width='4' stroke-linecap='round'/%3E%3C/svg%3E">
+<style>
+  :root{
+    --page:#e9ebef;
+    --card:#ffffff;
+    --line:#d6d9df;
+    --line-soft:#e7eaee;
+    --ink:#1c2128;
+    --ink-2:#5b6470;
+    --ink-3:#8a929c;
+    --accent:#2b7de9;
+    --accent-ink:#ffffff;
+    --track:#e3e6ea;
+    --ok:#1f9d66;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    background:var(--page);
+    color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    font-size:15px;line-height:1.6;
+    padding:32px 16px 56px;
+  }
+  .wrap{max-width:580px;margin:0 auto}
+
+  header h1{font-size:20px;font-weight:650;letter-spacing:.2px}
+  header p{color:var(--ink-2);font-size:14px;margin-top:6px}
+
+  /* ===== 舞台 ===== */
+  .stage{
+    background:var(--card);
+    border:1px solid var(--line);
+    border-radius:14px;
+    margin-top:22px;
+    padding:36px 20px;
+    display:flex;align-items:center;justify-content:center;
+    min-height:240px;
+  }
+  .stage-canvas-box{position:relative}
+  canvas#view{display:block}
+
+  /* ===== 参数面板 ===== */
+  .panel{
+    background:var(--card);
+    border:1px solid var(--line);
+    border-radius:14px;
+    margin-top:16px;
+    padding:20px;
+  }
+  .panel h2{font-size:13px;font-weight:600;color:var(--ink-2);letter-spacing:.4px;margin-bottom:14px}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px 20px}
+  @media (max-width:520px){.grid{grid-template-columns:1fr}}
+  .field label{display:flex;justify-content:space-between;align-items:baseline;font-size:13px;color:var(--ink-2);margin-bottom:6px}
+  .field label output{font-family:var(--mono);font-size:13px;color:var(--ink);font-variant-numeric:tabular-nums}
+  .field input[type=range]{width:100%;accent-color:var(--accent);height:28px}
+  .field input[type=color]{
+    width:100%;height:38px;border:1px solid var(--line);border-radius:8px;background:#fff;padding:3px;cursor:pointer;
+  }
+  .seg{display:flex;border:1px solid var(--line);border-radius:9px;overflow:hidden;height:38px}
+  .seg button{
+    flex:1;border:0;background:#fff;color:var(--ink-2);font-size:13px;cursor:pointer;
+    font-family:inherit;
+  }
+  .seg button.active{background:var(--accent);color:var(--accent-ink)}
+  .check{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--ink-2);height:38px}
+  .check input{accent-color:var(--accent);width:18px;height:18px}
+
+  /* ===== 导出 ===== */
+  .actions{display:flex;gap:12px;flex-wrap:wrap;margin-top:16px}
+  .btn{
+    min-height:44px;padding:0 18px;border-radius:10px;border:1px solid var(--line);
+    background:#fff;color:var(--ink);font-size:14px;font-family:inherit;cursor:pointer;
+  }
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+  .btn:disabled{opacity:.55;cursor:wait}
+  .status{font-family:var(--mono);font-size:12.5px;color:var(--ink-3);margin-top:12px;min-height:20px}
+  .status.ok{color:var(--ok)}
+
+  /* ===== 等价 C 代码 ===== */
+  .code{
+    background:#1c2128;color:#d7dde5;border-radius:12px;margin-top:16px;
+    padding:16px 18px;font-family:var(--mono);font-size:12.5px;line-height:1.7;overflow-x:auto;
+  }
+  .code .cm{color:#7d8794}
+  .code .fn{color:#7fb4f5}
+  .code .num{color:#e6b873}
+  footer{margin-top:18px;font-size:12.5px;color:var(--ink-3)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>LVGL Spinner 本地复刻</h1>
+    <p>静态淡环 + 一段高亮弧匀速旋转，参数对齐 <code>lv_spinner_set_anim_params(spinner, spin_duration, angle)</code>，可直接导出 GIF / WebM 留档。</p>
+  </header>
+
+  <div class="stage">
+    <div class="stage-canvas-box"><canvas id="view"></canvas></div>
+  </div>
+
+  <section class="panel">
+    <h2>参数（对应 LVGL 接口）</h2>
+    <div class="grid">
+      <div class="field">
+        <label>一圈时长 spin_duration <output id="o-duration">10000 ms</output></label>
+        <input type="range" id="duration" min="500" max="30000" step="100" value="10000">
+      </div>
+      <div class="field">
+        <label>弧长 angle <output id="o-angle">200°</output></label>
+        <input type="range" id="angle" min="30" max="360" step="5" value="200">
+      </div>
+      <div class="field">
+        <label>线宽 arc_width <output id="o-width">8 px</output></label>
+        <input type="range" id="width" min="2" max="20" step="1" value="8">
+      </div>
+      <div class="field">
+        <label>尺寸 <output id="o-size">160 px</output></label>
+        <input type="range" id="size" min="80" max="320" step="10" value="160">
+      </div>
+      <div class="field">
+        <label>指示弧颜色 arc_color</label>
+        <input type="color" id="indicator" value="#2b7de9">
+      </div>
+      <div class="field">
+        <label>静态环颜色 MAIN</label>
+        <input type="color" id="track" value="#e3e6ea">
+      </div>
+      <div class="field">
+        <label>旋转方向</label>
+        <div class="seg" id="dir">
+          <button type="button" data-dir="1" class="active">顺时针</button>
+          <button type="button" data-dir="-1">逆时针</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>舞台背景</label>
+        <div class="check"><input type="checkbox" id="transparent" checked><span>透明背景（导出 GIF 用）</span></div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button type="button" class="btn primary" id="btn-gif">导出 GIF（一圈）</button>
+      <button type="button" class="btn" id="btn-webm">录制 WebM（一圈）</button>
+    </div>
+    <div class="status" id="status"></div>
+  </section>
+
+  <pre class="code" id="code"></pre>
+
+  <footer>GIF 编码由 gif.js（jsDelivr CDN）完成，需联网；WebM 使用浏览器原生 MediaRecorder，离线可用。</footer>
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  var state = {
+    duration: 10000,
+    angle: 200,
+    width: 8,
+    size: 160,
+    indicator: "#2b7de9",
+    track: "#e3e6ea",
+    dir: 1,
+    transparent: true
+  };
+
+  var canvas = document.getElementById("view");
+  var ctx = canvas.getContext("2d");
+  var statusEl = document.getElementById("status");
+
+  /* ---------- 绘制：tMs 为相对起点的毫秒数 ---------- */
+  function draw(c, tMs){
+    var s = state.size;
+    c.clearRect(0, 0, s, s);
+    if(!state.transparent){
+      c.fillStyle = "#ffffff";
+      c.fillRect(0, 0, s, s);
+    }
+    var cx = s/2, cy = s/2;
+    var r = s/2 - state.width/2 - 2;
+
+    /* 静态环 MAIN */
+    c.beginPath();
+    c.arc(cx, cy, r, 0, Math.PI*2);
+    c.strokeStyle = state.track;
+    c.lineWidth = state.width;
+    c.lineCap = "round";
+    c.stroke();
+
+    /* 旋转指示弧 INDICATOR */
+    var rot = (tMs / state.duration) * Math.PI*2;
+    var start = -Math.PI/2 + rot*state.dir;
+    var sweep = state.angle * Math.PI/180 * state.dir;
+    c.beginPath();
+    c.arc(cx, cy, r, start, start + sweep, state.dir < 0);
+    c.strokeStyle = state.indicator;
+    c.lineWidth = state.width;
+    c.lineCap = "round";
+    c.stroke();
+  }
+
+  /* ---------- 高清适配 + 主循环 ---------- */
+  function fitCanvas(){
+    var dpr = window.devicePixelRatio || 1;
+    canvas.width = state.size * dpr;
+    canvas.height = state.size * dpr;
+    canvas.style.width = state.size + "px";
+    canvas.style.height = state.size + "px";
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  function loop(now){
+    draw(ctx, now);
+    requestAnimationFrame(loop);
+  }
+
+  /* ---------- 控件绑定 ---------- */
+  function setStatus(msg, ok){
+    statusEl.textContent = msg;
+    statusEl.className = "status" + (ok ? " ok" : "");
+  }
+  function bindRange(id, key, outId, fmt){
+    var el = document.getElementById(id);
+    var out = document.getElementById(outId);
+    el.addEventListener("input", function(){
+      state[key] = Number(el.value);
+      out.textContent = fmt(Number(el.value));
+      if(key === "size") fitCanvas();
+      renderCode();
+    });
+  }
+  bindRange("duration", "duration", "o-duration", function(v){return v + " ms";});
+  bindRange("angle", "angle", "o-angle", function(v){return v + "°";});
+  bindRange("width", "width", "o-width", function(v){return v + " px";});
+  bindRange("size", "size", "o-size", function(v){return v + " px";});
+
+  document.getElementById("indicator").addEventListener("input", function(e){
+    state.indicator = e.target.value; renderCode();
+  });
+  document.getElementById("track").addEventListener("input", function(e){
+    state.track = e.target.value;
+  });
+  document.getElementById("transparent").addEventListener("change", function(e){
+    state.transparent = e.target.checked;
+  });
+  document.getElementById("dir").addEventListener("click", function(e){
+    var btn = e.target.closest("button");
+    if(!btn) return;
+    state.dir = Number(btn.dataset.dir);
+    this.querySelectorAll("button").forEach(function(b){b.classList.toggle("active", b === btn);});
+  });
+
+  /* ---------- 等价 C 代码 ---------- */
+  function renderCode(){
+    document.getElementById("code").innerHTML =
+'<span class="cm">/* 对应页面参数实时生成 */</span>\n' +
+'lv_obj_t * spinner = <span class="fn">lv_spinner_create</span>(lv_screen_active());\n' +
+'<span class="fn">lv_obj_set_size</span>(spinner, <span class="num">' + state.size + '</span>, <span class="num">' + state.size + '</span>);\n' +
+'<span class="fn">lv_obj_center</span>(spinner);\n' +
+'<span class="fn">lv_spinner_set_anim_params</span>(spinner, <span class="num">' + state.duration + '</span>, <span class="num">' + state.angle + '</span>);\n' +
+'<span class="cm">/* 样式：arc_width=' + state.width + ', arc_color=' + state.indicator + ' */</span>';
+  }
+
+  /* ---------- 下载 ---------- */
+  function download(blob, name){
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function(){URL.revokeObjectURL(a.href);}, 2000);
+  }
+
+  /* ---------- GIF 导出（gif.js via jsDelivr） ---------- */
+  var gifLib = null;
+  function loadGif(){
+    if(gifLib) return Promise.resolve(gifLib);
+    return new Promise(function(resolve, reject){
+      var s = document.createElement("script");
+      s.src = "https://fastly.jsdelivr.net/npm/gif.js@0.2.0/dist/gif.js";
+      s.onload = function(){ gifLib = window.GIF; resolve(gifLib); };
+      s.onerror = function(){ reject(new Error("gif.js 加载失败（需联网），可改用 WebM")); };
+      document.head.appendChild(s);
+    });
+  }
+
+  document.getElementById("btn-gif").addEventListener("click", function(){
+    var btn = this;
+    btn.disabled = true;
+    setStatus("加载 GIF 编码器…");
+    loadGif().then(function(GIF){
+      var fps = 15;
+      var frames = Math.max(2, Math.round(state.duration/1000 * fps));
+      var workerUrl = "https://fastly.jsdelivr.net/npm/gif.js@0.2.0/dist/gif.worker.js";
+      var gif = new GIF({workers:2, quality:10, width:state.size, height:state.size, workerScript:workerUrl});
+      var off = document.createElement("canvas");
+      off.width = off.height = state.size;
+      var octx = off.getContext("2d");
+      var i = 0;
+      function step(){
+        if(i < frames){
+          draw(octx, i/fps*1000);
+          gif.addFrame(off, {delay:Math.round(1000/fps), copy:true});
+          setStatus("渲染帧 " + (i+1) + "/" + frames);
+          i++;
+          setTimeout(step, 0);
+        }else{
+          gif.on("finished", function(blob){
+            download(blob, "spinner.gif");
+            setStatus("GIF 已保存：" + frames + " 帧 / " + fps + "fps", true);
+            btn.disabled = false;
+          });
+          gif.on("progress", function(p){ setStatus("编码 GIF " + Math.round(p*100) + "%"); });
+          gif.render();
+        }
+      }
+      step();
+    }).catch(function(err){
+      setStatus(err.message);
+      btn.disabled = false;
+    });
+  });
+
+  /* ---------- WebM 录制（原生，离线可用） ---------- */
+  document.getElementById("btn-webm").addEventListener("click", function(){
+    var btn = this;
+    if(!canvas.captureStream || typeof MediaRecorder === "undefined"){
+      setStatus("当前浏览器不支持 MediaRecorder，请用 Chrome/Edge");
+      return;
+    }
+    btn.disabled = true;
+    var stream = canvas.captureStream(30);
+    var rec = new MediaRecorder(stream, {mimeType:"video/webm"});
+    var chunks = [];
+    rec.ondataavailable = function(e){ if(e.data.size) chunks.push(e.data); };
+    rec.onstop = function(){
+      download(new Blob(chunks, {type:"video/webm"}), "spinner.webm");
+      setStatus("WebM 已保存（一圈 " + state.duration + " ms）", true);
+      btn.disabled = false;
+    };
+    setStatus("录制中，约 " + Math.round(state.duration/1000) + " 秒…");
+    rec.start();
+    setTimeout(function(){ rec.stop(); }, state.duration);
+  });
+
+  fitCanvas();
+  renderCode();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LVGL Lottie 复刻与导出</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='4' y='4' width='24' height='24' rx='6' fill='%232b7de9'/%3E%3Ccircle cx='16' cy='16' r='8' fill='none' stroke='%23fff' stroke-width='2.4'/%3E%3Cpath d='M16 10l1.8 4.2L22 16l-4.2 1.8L16 22l-1.8-4.2L10 16l4.2-1.8z' fill='%23fff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="../assets/panel.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <a class="back" href="../index.html">← 返回画廊</a>
+    <h1>LVGL Lottie 本地复刻</h1>
+    <p>用 Canvas 模拟 Lottie 矢量动画（脉冲同心圆 + 旋转星形 + 进度条），展示 JSON 关键帧经像素缓冲交给 <code>lv_lottie</code> 渲染的流程，速度与循环实时可调。</p>
+  </header>
+
+  <div class="stage">
+    <div class="stage-canvas-box"><canvas id="view"></canvas></div>
+  </div>
+
+  <section class="panel">
+    <h2>参数（对应 LVGL 接口）</h2>
+    <div class="grid">
+      <div class="field">
+        <label>动画尺寸 size <output id="o-size">200 × 112</output></label>
+        <input type="range" id="size" min="140" max="280" step="4" value="200">
+      </div>
+      <div class="field">
+        <label>播放速度 speed <output id="o-speed">1.00×</output></label>
+        <input type="range" id="speed" min="0.25" max="3" step="0.25" value="1">
+      </div>
+      <div class="field">
+        <label>循环播放 loop</label>
+        <div class="check"><input type="checkbox" id="loop" checked><span>关闭后播放一轮即停在末帧</span></div>
+      </div>
+      <div class="field">
+        <label>当前状态</label>
+        <div class="check"><span style="font-size:12px" id="play-state">播放中 · 2.00 s / 轮</span></div>
+      </div>
+      <div class="field wide">
+        <label>渲染流程</label>
+        <div class="check"><span style="font-size:12px">animation.json → 图层树解析 → 像素缓冲（ARGB8888）→ lv_lottie 逐帧渲染</span></div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button type="button" class="btn" id="btn-play">暂停</button>
+      <button type="button" class="btn" id="btn-replay">重播</button>
+      <button type="button" class="btn primary" id="btn-gif">导出 GIF</button>
+      <button type="button" class="btn" id="btn-webm">录制 WebM</button>
+      <button type="button" class="btn" id="btn-png">导出 PNG</button>
+    </div>
+    <div class="status" id="status"></div>
+  </section>
+
+  <pre class="code" id="code"></pre>
+
+  <footer>画布尺寸 320×240。GIF 编码由 gif.js（jsDelivr CDN）完成，需联网；WebM 使用浏览器原生 MediaRecorder，离线可用。</footer>
+</div>
+
+<script src="../assets/widget-kit.js"></script>
+<script>
+(function () {
+  "use strict";
+  var K = LVKit, W = 320, H = 240;
+  var LOOP = 2000;
+
+  var state = {
+    playing: true,
+    speed: 1,
+    loop: true,
+    size: 200
+  };
+
+  var view = K.view(document.getElementById("view"));
+  view.resize(W, H);
+  var clock = { acc: 0, last: 0 };
+
+  function boxH(size) { return Math.round(size * 0.56); }
+
+  function drawChip(c, x, y, label, mono, primary) {
+    var tw = K.measure(c, label, { size: 10.5, mono: mono });
+    var w = tw + 16, h = 20;
+    K.box(c, x, y - h / 2, w, h, {
+      bg: primary ? "#eaf2fd" : "#f2f5f9",
+      radius: 6, borderWidth: 1, border: primary ? "#c6dcf8" : "#e3e8ef"
+    });
+    K.text(c, label, x + w / 2, y, {
+      size: 10.5, mono: mono, color: primary ? K.theme.primaryDark : K.theme.textMuted, align: "center"
+    });
+    return w;
+  }
+
+  function starPath(c, cx, cy, outer, inner, rot) {
+    c.beginPath();
+    for (var i = 0; i < 10; i++) {
+      var a = rot + i * Math.PI / 5 - Math.PI / 2;
+      var r = (i % 2 === 0) ? outer : inner;
+      if (i === 0) c.moveTo(cx + Math.cos(a) * r, cy + Math.sin(a) * r);
+      else c.lineTo(cx + Math.cos(a) * r, cy + Math.sin(a) * r);
+    }
+    c.closePath();
+  }
+
+  function drawScene(c, tMs, loop) {
+    var p = loop ? (tMs % LOOP) / LOOP : K.clamp(tMs / LOOP, 0, 1);
+
+    c.clearRect(0, 0, W, H);
+    K.box(c, 12, 8, W - 24, H - 16, {
+      bg: "#ffffff", radius: 14, borderWidth: 1, border: "#e7eaee",
+      shadow: "rgba(28,33,40,0.07)", shadowBlur: 14, shadowY: 4
+    });
+
+    /* 流程标签 */
+    var l1 = "animation.json", l2 = "lv_lottie 渲染";
+    var w1 = K.measure(c, l1, { size: 10.5, mono: true }) + 16;
+    var w2 = K.measure(c, l2, { size: 10.5, mono: false }) + 16;
+    var total = w1 + 16 + w2;
+    var sx = (W - total) / 2;
+    drawChip(c, sx, 26, l1, true, false);
+    K.text(c, "→", sx + w1 + 8, 26, { size: 12, color: K.theme.textFaint, align: "center" });
+    drawChip(c, sx + w1 + 16, 26, l2, false, true);
+
+    var bw = state.size, bh = boxH(state.size);
+    var bx = (W - bw) / 2, by = 42;
+
+    /* 缓冲边界 */
+    c.save();
+    c.setLineDash([4, 4]);
+    c.strokeStyle = "#c6d8f0";
+    c.lineWidth = 1;
+    K.roundRectPath(c, bx - 3.5, by - 3.5, bw + 7, bh + 7, 14);
+    c.stroke();
+    c.restore();
+
+    c.save();
+    K.roundRectPath(c, bx, by, bw, bh, 12);
+    c.clip();
+
+    var g = c.createLinearGradient(bx, by, bx, by + bh);
+    g.addColorStop(0, "#f8fbff");
+    g.addColorStop(1, "#eef4fd");
+    c.fillStyle = g;
+    c.fillRect(bx, by, bw, bh);
+
+    var cx = bx + bw / 2;
+    var cy = by + bh / 2 - 4;
+    var base = Math.min(bw, bh) * 0.40;
+
+    /* 静态参考环 */
+    c.beginPath();
+    c.arc(cx, cy, base, 0, Math.PI * 2);
+    c.strokeStyle = "#dfe9f7";
+    c.lineWidth = 1.5;
+    c.stroke();
+
+    /* 脉冲同心圆 */
+    for (var i = 0; i < 3; i++) {
+      var q = (p + i / 3) % 1;
+      var r = base * (0.22 + 0.78 * q);
+      c.save();
+      c.globalAlpha = (1 - q) * 0.55;
+      c.beginPath();
+      c.arc(cx, cy, r, 0, Math.PI * 2);
+      c.strokeStyle = i === 1 ? "#e6a23c" : K.theme.primary;
+      c.lineWidth = 2;
+      c.stroke();
+      c.restore();
+    }
+
+    /* 轨道点 + 旋转星形 */
+    var orbit = base * 0.62;
+    var oa = p * Math.PI * 2;
+    c.save();
+    c.globalAlpha = 0.45;
+    c.beginPath();
+    c.arc(cx, cy, orbit, 0, Math.PI * 2);
+    c.strokeStyle = "#cfe1f7";
+    c.lineWidth = 1;
+    c.stroke();
+    c.restore();
+
+    var sx2 = cx + Math.cos(oa) * orbit;
+    var sy2 = cy + Math.sin(oa) * orbit;
+    c.beginPath();
+    c.arc(sx2, sy2, 3.2, 0, Math.PI * 2);
+    c.fillStyle = K.theme.primary;
+    c.fill();
+
+    starPath(c, cx, cy, base * 0.34, base * 0.15, p * Math.PI * 4);
+    c.fillStyle = "#e6a23c";
+    c.fill();
+    c.lineWidth = 1.4;
+    c.strokeStyle = "#ffffff";
+    c.stroke();
+
+    /* 进度条 */
+    var px = bx + 16, pw = bw - 32, py = by + bh - 18;
+    K.box(c, px, py, pw, 7, { bg: "#dfe7f2", radius: 4 });
+    if (p > 0.002) K.box(c, px, py, Math.max(7, pw * p), 7, { bg: K.theme.primary, radius: 4 });
+    K.text(c, Math.round(p * 100) + "%", bx + bw - 16, py - 9, {
+      size: 9.5, mono: true, color: K.theme.textFaint, align: "right"
+    });
+
+    c.restore();
+
+    K.text(c, "缓冲 " + state.size + " × " + bh + " px · ARGB8888", W / 2, 210, {
+      size: 11, color: K.theme.textMuted, align: "center"
+    });
+    var dur = (LOOP / state.speed / 1000).toFixed(2);
+    K.text(c, (state.playing ? "播放中" : "已暂停") + " · 速度 " + state.speed.toFixed(2) + "× · " + dur + " s / 轮", W / 2, 226, {
+      size: 11, color: K.theme.textFaint, align: "center"
+    });
+  }
+
+  /* ---------- 主循环 ---------- */
+  function syncPlayBtn() {
+    document.getElementById("btn-play").textContent = state.playing ? "暂停" : "播放";
+    document.getElementById("play-state").textContent = state.playing
+      ? "播放中 · " + (LOOP / state.speed / 1000).toFixed(2) + " s / 轮"
+      : "已暂停";
+  }
+
+  function setPlaying(on, reset) {
+    if (reset) clock.acc = 0;
+    if (on && !state.loop && clock.acc >= LOOP) clock.acc = 0;
+    state.playing = on;
+    syncPlayBtn();
+  }
+
+  K.run(function (now) {
+    if (!clock.last) clock.last = now;
+    var dt = now - clock.last;
+    clock.last = now;
+    if (state.playing) {
+      clock.acc += dt * state.speed;
+      if (!state.loop && clock.acc >= LOOP) {
+        clock.acc = LOOP;
+        state.playing = false;
+        syncPlayBtn();
+      }
+    }
+    drawScene(view.ctx, clock.acc, state.loop);
+  });
+
+  /* ---------- 代码 ---------- */
+  function renderCode() {
+    var bh = boxH(state.size);
+    var L = [];
+    L.push(K.cm("/* Lottie JSON（矢量关键帧）→ 像素缓冲 → 逐帧渲染 */"));
+    L.push("lv_obj_t * lottie = " + K.fn("lv_lottie_create") + "(lv_screen_active());");
+    L.push(K.fn("lv_obj_set_size") + "(lottie, " + K.num(state.size) + ", " + K.num(bh) + ");");
+    L.push("static uint8_t lottie_buf[" + state.size + " * " + bh + " * 4];");
+    L.push(K.fn("lv_lottie_set_buffer") + "(lottie, " + K.num(state.size) + ", " + K.num(bh) + ", lottie_buf);");
+    L.push(K.fn("lv_lottie_set_src_data") + "(lottie, lottie_json, sizeof(lottie_json));");
+    L.push("lv_anim_t * anim = " + K.fn("lv_lottie_get_anim") + "(lottie);");
+    L.push(K.fn("lv_anim_set_duration") + "(anim, " + K.num(LOOP) + ");" + K.cm("  /* 速度 " + state.speed.toFixed(2) + "×：基础时长 / 速度 */"));
+    L.push(K.fn("lv_anim_set_repeat_count") + "(anim, " +
+      (state.loop ? K.num("LV_ANIM_REPEAT_INFINITE") : K.num(1)) + ");");
+    L.push(K.fn("lv_obj_center") + "(lottie);");
+    K.code(L);
+  }
+
+  /* ---------- 控件 ---------- */
+  K.bindRange("size", function (v) { return v + " × " + boxH(v); }, function (v) {
+    state.size = v;
+    renderCode();
+  });
+  K.bindRange("speed", function (v) { return v.toFixed(2) + "×"; }, function (v) {
+    state.speed = v;
+    renderCode();
+    syncPlayBtn();
+  });
+  K.bindCheck("loop", function (on) {
+    state.loop = on;
+    if (on && clock.acc >= LOOP) clock.acc = 0;
+    renderCode();
+  });
+
+  document.getElementById("btn-play").addEventListener("click", function () {
+    setPlaying(!state.playing, false);
+  });
+  document.getElementById("btn-replay").addEventListener("click", function () {
+    setPlaying(true, true);
+  });
+  view.canvas.addEventListener("pointerdown", function () {
+    setPlaying(!state.playing, false);
+  });
+
+  /* ---------- 导出 ---------- */
+  document.getElementById("btn-png").addEventListener("click", function () {
+    K.exportPng(view.canvas, "lottie.png");
+  });
+
+  document.getElementById("btn-gif").addEventListener("click", function () {
+    var btn = this;
+    btn.disabled = true;
+    K.exportGif({
+      name: "lottie.gif", w: W, h: H, fps: 20, duration: LOOP,
+      frame: function (c, t) { drawScene(c, t, true); },
+      onDone: function () { btn.disabled = false; },
+      onError: function () { btn.disabled = false; }
+    });
+  });
+
+  document.getElementById("btn-webm").addEventListener("click", function () {
+    var btn = this;
+    btn.disabled = true;
+    K.exportWebm({
+      canvas: view.canvas, name: "lottie.webm", duration: LOOP,
+      before: function () {
+        var old = { playing: state.playing, loop: state.loop };
+        state.playing = true;
+        state.loop = true;
+        clock.acc = 0;
+        clock.last = 0;
+        syncPlayBtn();
+        return old;
+      },
+      after: function (old) {
+        state.playing = old.playing;
+        state.loop = old.loop;
+        syncPlayBtn();
+      },
+      onDone: function () { btn.disabled = false; },
+      onError: function () { btn.disabled = false; }
+    });
+  });
+
+  renderCode();
+  syncPlayBtn();
+})();
+</script>
+</body>
+</html>

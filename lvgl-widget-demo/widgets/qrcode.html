@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LVGL QR Code 复刻与导出</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='4' y='4' width='24' height='24' rx='4' fill='%23fff' stroke='%232b7de9' stroke-width='2'/%3E%3Cpath d='M8 8h6v6H8zM18 8h6v6h-6zM8 18h6v6H8z' fill='%231c2128'/%3E%3Cpath d='M18 18h2v2h-2zM22 18h2v2h-2zM20 20h2v2h-2zM18 22h2v2h-2zM22 22h2v2h-2z' fill='%231c2128'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="../assets/panel.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <a class="back" href="../index.html">← 返回画廊</a>
+    <h1>LVGL QR Code 本地复刻</h1>
+    <p>由输入文本生成 25×25 的确定性示意矩阵，三个定位角、时序线与数据区齐备，静区、尺寸、配色与纠错密度实时可调，参数对齐 <code>lv_qrcode_set_size()</code> / <code>lv_qrcode_set_quiet_zone()</code>。</p>
+  </header>
+
+  <div class="stage">
+    <div class="stage-canvas-box"><canvas id="view"></canvas></div>
+  </div>
+
+  <section class="panel">
+    <h2>参数（对应 LVGL 接口）</h2>
+    <div class="grid">
+      <div class="field wide">
+        <label>数据 set_data</label>
+        <input type="text" id="text" value="https://lvgl.io" maxlength="40">
+      </div>
+      <div class="field">
+        <label>尺寸 set_size <output id="o-size">170 px</output></label>
+        <input type="range" id="size" min="120" max="220" step="5" value="170">
+      </div>
+      <div class="field">
+        <label>静区 set_quiet_zone</label>
+        <div class="seg" id="quiet">
+          <button type="button" data-val="on" class="active">开启</button>
+          <button type="button" data-val="off">关闭</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>深色模块 set_dark_color</label>
+        <input type="color" id="dark" value="#1c2128">
+      </div>
+      <div class="field">
+        <label>浅色底 set_light_color</label>
+        <input type="color" id="light" value="#ffffff">
+      </div>
+      <div class="field wide">
+        <label>纠错等级（改变数据区密度）</label>
+        <div class="seg" id="ecc">
+          <button type="button" data-val="L">L</button>
+          <button type="button" data-val="M" class="active">M</button>
+          <button type="button" data-val="Q">Q</button>
+          <button type="button" data-val="H">H</button>
+        </div>
+      </div>
+      <div class="field wide">
+        <label>说明</label>
+        <div class="check"><span style="font-size:12px">图案由文本哈希确定性生成，仅为演示用示意矩阵，并非真实二维码编码，无法被扫码器识别。</span></div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button type="button" class="btn primary" id="btn-png">导出 PNG</button>
+    </div>
+    <div class="status" id="status"></div>
+  </section>
+
+  <pre class="code" id="code"></pre>
+
+  <footer>画布尺寸 320×240。图案为演示用示意矩阵，并非真实二维码编码，无法被扫码器识别。PNG 导出离线可用；GIF 需联网（gif.js CDN），WebM 基于浏览器原生 MediaRecorder，离线可用。</footer>
+</div>
+
+<script src="../assets/widget-kit.js"></script>
+<script>
+(function () {
+  "use strict";
+  var K = LVKit, W = 320, H = 240;
+  var MOD = 25;
+
+  var state = {
+    text: "https://lvgl.io",
+    size: 170,
+    quiet: true,
+    dark: "#1c2128",
+    light: "#ffffff",
+    ecc: "M"
+  };
+
+  var view = K.view(document.getElementById("view"));
+  view.resize(W, H);
+
+  /* ---------- 确定性图案 ---------- */
+  function hashStr(s) {
+    var h = 2166136261 % 2147483647;
+    for (var i = 0; i < s.length; i++) {
+      h = (h * 131 + s.charCodeAt(i)) % 2147483647;
+    }
+    return h;
+  }
+
+  function prand(x, y, seed) {
+    var n = ((x * 73856093) ^ (y * 19349663) ^ seed) & 0x7fffffff;
+    n = (n * 48271) % 2147483647;
+    n = (n * 48271) % 2147483647;
+    return n / 2147483647;
+  }
+
+  var DENSITY = { L: 0.40, M: 0.49, Q: 0.58, H: 0.67 };
+  var cache = { key: "", matrix: null };
+
+  function buildMatrix() {
+    var key = state.text + "|" + state.ecc;
+    if (cache.key === key) return cache.matrix;
+
+    var seed = hashStr(key);
+    var m = [], reserved = [], x, y, i;
+    for (y = 0; y < MOD; y++) {
+      m.push([]);
+      reserved.push([]);
+      for (x = 0; x < MOD; x++) {
+        m[y].push(false);
+        reserved[y].push(false);
+      }
+    }
+    function setv(px, py, v) {
+      if (px < 0 || py < 0 || px >= MOD || py >= MOD) return;
+      m[py][px] = !!v;
+      reserved[py][px] = true;
+    }
+    function finder(ox, oy) {
+      for (var yy = -1; yy <= 7; yy++) {
+        for (var xx = -1; xx <= 7; xx++) {
+          var edge = (xx === 0 || xx === 6 || yy === 0 || yy === 6);
+          var core = (xx >= 2 && xx <= 4 && yy >= 2 && yy <= 4);
+          setv(ox + xx, oy + yy, (xx >= 0 && xx <= 6 && yy >= 0 && yy <= 6) && (edge || core));
+        }
+      }
+    }
+
+    finder(0, 0);
+    finder(MOD - 7, 0);
+    finder(0, MOD - 7);
+
+    /* 时序线 */
+    for (i = 8; i <= MOD - 9; i++) {
+      setv(i, 6, i % 2 === 0);
+      setv(6, i, i % 2 === 0);
+    }
+
+    /* 校正图案（5×5） */
+    for (y = -2; y <= 2; y++) {
+      for (x = -2; x <= 2; x++) {
+        var ring = Math.max(Math.abs(x), Math.abs(y));
+        setv(MOD - 9 + x, MOD - 9 + y, ring !== 1);
+      }
+    }
+
+    /* 数据区 */
+    var density = DENSITY[state.ecc] || 0.49;
+    for (y = 0; y < MOD; y++) {
+      for (x = 0; x < MOD; x++) {
+        if (reserved[y][x]) continue;
+        m[y][x] = prand(x, y, seed) < density;
+      }
+    }
+
+    cache.key = key;
+    cache.matrix = m;
+    return m;
+  }
+
+  /* ---------- 绘制 ---------- */
+  function draw(c) {
+    c.clearRect(0, 0, W, H);
+    K.box(c, 12, 8, W - 24, H - 16, {
+      bg: "#ffffff", radius: 14, borderWidth: 1, border: "#e7eaee",
+      shadow: "rgba(28,33,40,0.07)", shadowBlur: 14, shadowY: 4
+    });
+
+    var size = state.size;
+    var quiet = state.quiet ? 4 : 0;
+    var total = MOD + quiet * 2;
+    var unit = size / total;
+    var qx = (W - size) / 2;
+    var qy = 120 - size / 2;
+    var m = buildMatrix();
+
+    /* 对象边界 */
+    c.save();
+    c.setLineDash([3, 3]);
+    c.strokeStyle = "#cfd8e3";
+    c.lineWidth = 1;
+    K.roundRectPath(c, qx - 2.5, qy - 2.5, size + 5, size + 5, 6);
+    c.stroke();
+    c.restore();
+
+    c.fillStyle = state.light;
+    c.fillRect(qx, qy, size, size);
+
+    c.fillStyle = state.dark;
+    var ox = qx + quiet * unit, oy = qy + quiet * unit;
+    for (var y = 0; y < MOD; y++) {
+      for (var x = 0; x < MOD; x++) {
+        if (!m[y][x]) continue;
+        c.fillRect(ox + x * unit, oy + y * unit, unit + 0.25, unit + 0.25);
+      }
+    }
+
+    var capY = qy + size + 9;
+    if (capY < 231) {
+      K.text(c, "示意矩阵 25×25 · 静区 " + (state.quiet ? "4 模块" : "关闭"), W / 2, capY, {
+        size: 9.5, color: K.theme.textFaint, align: "center"
+      });
+    }
+  }
+
+  /* ---------- 代码 ---------- */
+  function renderCode() {
+    var L = [];
+    L.push(K.cm("/* 由页面参数实时生成；纠错等级 " + state.ecc + " 由 LVGL 编码器自动选择 */"));
+    L.push("lv_obj_t * qr = " + K.fn("lv_qrcode_create") + "(lv_screen_active());");
+    L.push(K.fn("lv_qrcode_set_size") + "(qr, " + K.num(state.size) + ");");
+    L.push(K.fn("lv_qrcode_set_dark_color") + "(qr, " + K.fn("lv_color_hex") + "(" + K.num(K.hexCode(state.dark)) + "));");
+    L.push(K.fn("lv_qrcode_set_light_color") + "(qr, " + K.fn("lv_color_hex") + "(" + K.num(K.hexCode(state.light)) + "));");
+    L.push(K.fn("lv_qrcode_set_quiet_zone") + "(qr, " + K.num(state.quiet ? "true" : "false") + ");");
+    L.push(K.fn("lv_qrcode_set_data") + "(qr, " + JSON.stringify(state.text || "") + ");");
+    L.push(K.fn("lv_obj_center") + "(qr);");
+    K.code(L);
+  }
+
+  /* ---------- 控件 ---------- */
+  document.getElementById("text").addEventListener("input", function (e) {
+    state.text = e.target.value;
+    renderCode();
+  });
+  K.bindRange("size", function (v) { return v + " px"; }, function (v) {
+    state.size = v;
+    renderCode();
+  });
+  K.bindSeg("quiet", function (v) {
+    state.quiet = v === "on";
+    renderCode();
+  });
+  document.getElementById("dark").addEventListener("input", function (e) {
+    state.dark = e.target.value;
+    renderCode();
+  });
+  document.getElementById("light").addEventListener("input", function (e) {
+    state.light = e.target.value;
+    renderCode();
+  });
+  K.bindSeg("ecc", function (v) {
+    state.ecc = v;
+    renderCode();
+  });
+
+  document.getElementById("btn-png").addEventListener("click", function () {
+    K.exportPng(view.canvas, "qrcode.png");
+  });
+
+  K.run(function () { draw(view.ctx); });
+
+  renderCode();
+})();
+</script>
+</body>
+</html>

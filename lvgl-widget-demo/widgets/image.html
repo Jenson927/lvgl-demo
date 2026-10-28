@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LVGL Image 复刻与导出</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='4' y='7' width='24' height='18' rx='3' fill='%23a7d3fa'/%3E%3Cpath d='M4 20l7-6 5 4 6-7 6 6v8H4z' fill='%234f738f'/%3E%3Ccircle cx='23' cy='12' r='3' fill='%23ffe08a'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="../assets/panel.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <a class="back" href="../index.html">← 返回画廊</a>
+    <h1>LVGL Image 本地复刻</h1>
+    <p>用离屏 canvas 程序化绘制 160×120 风景图作为图像源，再按 LVGL 语义做旋转、缩放、pivot、offset、recolor 与透明度变换。棋盘格表示透明区域，虚线为未变换时的原始轮廓。</p>
+  </header>
+
+  <div class="stage">
+    <div class="stage-canvas-box"><canvas id="view"></canvas></div>
+  </div>
+
+  <section class="panel">
+    <h2>参数（对应 LVGL 接口）</h2>
+    <div class="grid">
+      <div class="field">
+        <label>旋转 set_rotation <output id="o-rotation">0.0°</output></label>
+        <input type="range" id="rotation" min="0" max="3599" step="1" value="0">
+      </div>
+      <div class="field">
+        <label>缩放 set_scale <output id="o-zoom">256（100%）</output></label>
+        <input type="range" id="zoom" min="32" max="512" step="8" value="256">
+      </div>
+
+      <div class="field">
+        <label>旋转中心 pivot x <output id="o-px">80</output></label>
+        <input type="range" id="px" min="0" max="160" step="1" value="80">
+      </div>
+      <div class="field">
+        <label>旋转中心 pivot y <output id="o-py">60</output></label>
+        <input type="range" id="py" min="0" max="120" step="1" value="60">
+      </div>
+
+      <div class="field">
+        <label>源偏移 offset_x <output id="o-offx">0 px</output></label>
+        <input type="range" id="offx" min="-80" max="80" step="1" value="0">
+      </div>
+      <div class="field">
+        <label>源偏移 offset_y <output id="o-offy">0 px</output></label>
+        <input type="range" id="offy" min="-60" max="60" step="1" value="0">
+      </div>
+
+      <div class="field">
+        <label>重着色 image_recolor</label>
+        <input type="color" id="recolor" value="#ffb703">
+      </div>
+      <div class="field">
+        <label>重着色强度 recolor_opa <output id="o-recoloropa">0</output></label>
+        <input type="range" id="recoloropa" min="0" max="255" step="1" value="0">
+      </div>
+
+      <div class="field">
+        <label>整体透明度 image_opa <output id="o-opa">100%</output></label>
+        <input type="range" id="opa" min="0" max="100" step="1" value="100">
+      </div>
+      <div class="field">
+        <label>抗锯齿 set_antialias</label>
+        <div class="check"><input type="checkbox" id="aa" checked><span>关闭后使用最近邻采样</span></div>
+      </div>
+
+      <div class="field wide">
+        <label>自动旋转</label>
+        <div class="check"><input type="checkbox" id="auto"><span>60°/s 连续旋转；导出 GIF / WebM 时强制开启</span></div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button type="button" class="btn primary" id="btn-gif">导出 GIF（自动旋转）</button>
+      <button type="button" class="btn" id="btn-webm">录制 WebM</button>
+      <button type="button" class="btn" id="btn-png">导出 PNG</button>
+    </div>
+    <div class="status" id="status"></div>
+  </section>
+
+  <pre class="code" id="code"></pre>
+
+  <footer>画布尺寸 320×240。GIF 编码由 gif.js（jsDelivr CDN）完成，需联网；WebM 使用浏览器原生 MediaRecorder，离线可用。</footer>
+</div>
+
+<script src="../assets/widget-kit.js"></script>
+<script>
+(function () {
+  "use strict";
+  var K = LVKit, W = 320, H = 240;
+  var IW = 160, IH = 120;
+  var IX = (W - IW) / 2, IY = (H - IH) / 2;
+
+  var state = {
+    rotation: 0,
+    zoom: 256,
+    px: 80,
+    py: 60,
+    offx: 0,
+    offy: 0,
+    recolor: "#ffb703",
+    recolorOpa: 0,
+    opa: 100,
+    aa: true,
+    auto: false
+  };
+
+  var view = K.view(document.getElementById("view"));
+  view.resize(W, H);
+  var t0 = performance.now();
+
+  function buildSource() {
+    var cv = document.createElement("canvas");
+    cv.width = IW;
+    cv.height = IH;
+    var c = cv.getContext("2d");
+
+    var sky = c.createLinearGradient(0, 0, 0, 82);
+    sky.addColorStop(0, "#57a8f0");
+    sky.addColorStop(0.55, "#a7d3fa");
+    sky.addColorStop(1, "#eaf5ff");
+    c.fillStyle = sky;
+    c.fillRect(0, 0, IW, 82);
+
+    c.save();
+    c.shadowColor = "#ffd166";
+    c.shadowBlur = 16;
+    c.fillStyle = "#ffe08a";
+    c.beginPath();
+    c.arc(118, 30, 13, 0, Math.PI * 2);
+    c.fill();
+    c.restore();
+    c.fillStyle = "#fff6cf";
+    c.beginPath();
+    c.arc(118, 30, 8, 0, Math.PI * 2);
+    c.fill();
+
+    c.beginPath();
+    c.moveTo(0, 88);
+    c.lineTo(0, 62);
+    c.lineTo(26, 48);
+    c.lineTo(46, 66);
+    c.lineTo(68, 44);
+    c.lineTo(92, 68);
+    c.lineTo(118, 50);
+    c.lineTo(160, 70);
+    c.lineTo(160, 92);
+    c.closePath();
+    c.fillStyle = "#8fb0c9";
+    c.fill();
+
+    c.beginPath();
+    c.moveTo(0, 98);
+    c.lineTo(0, 78);
+    c.lineTo(24, 64);
+    c.lineTo(50, 86);
+    c.lineTo(78, 60);
+    c.lineTo(104, 84);
+    c.lineTo(132, 68);
+    c.lineTo(160, 84);
+    c.lineTo(160, 102);
+    c.closePath();
+    c.fillStyle = "#4f738f";
+    c.fill();
+
+    var grass = c.createLinearGradient(0, 90, 0, IH);
+    grass.addColorStop(0, "#7ecb73");
+    grass.addColorStop(1, "#3f8f4f");
+    c.fillStyle = grass;
+    c.fillRect(0, 90, IW, IH - 90);
+
+    c.save();
+    c.strokeStyle = "rgba(255,255,255,0.20)";
+    c.lineWidth = 1;
+    for (var i = 8; i < IW; i += 17) {
+      c.beginPath();
+      c.moveTo(i, 108);
+      c.lineTo(i + 4, 98);
+      c.stroke();
+    }
+    c.restore();
+
+    /* 圆角处留透明，便于看到棋盘格 */
+    c.globalCompositeOperation = "destination-in";
+    c.fillStyle = "#ffffff";
+    K.roundRectPath(c, 0, 0, IW, IH, 10);
+    c.fill();
+    c.globalCompositeOperation = "source-over";
+    return cv;
+  }
+
+  var src = buildSource();
+  var tinted = null;
+  var tintKey = "";
+
+  function getImage() {
+    if (state.recolorOpa <= 0) return src;
+    var key = state.recolor + "|" + state.recolorOpa;
+    if (tinted && key === tintKey) return tinted;
+    var cv = document.createElement("canvas");
+    cv.width = IW;
+    cv.height = IH;
+    var c = cv.getContext("2d");
+    c.drawImage(src, 0, 0);
+    c.globalCompositeOperation = "source-atop";
+    c.fillStyle = K.alpha(state.recolor, state.recolorOpa / 255);
+    c.fillRect(0, 0, IW, IH);
+    tinted = cv;
+    tintKey = key;
+    return tinted;
+  }
+
+  function checker(c, x, y, w, h) {
+    c.save();
+    c.beginPath();
+    c.rect(x, y, w, h);
+    c.clip();
+    var s = 8;
+    for (var yy = 0; yy < h; yy += s) {
+      for (var xx = 0; xx < w; xx += s) {
+        c.fillStyle = ((xx / s + yy / s) % 2 === 0) ? "#f4f6f8" : "#e6e9ee";
+        c.fillRect(x + xx, y + yy, s, s);
+      }
+    }
+    c.restore();
+    c.strokeStyle = "#dfe3e8";
+    c.lineWidth = 1;
+    c.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+  }
+
+  function rotationAt(t, force) {
+    if (force || state.auto) return (t * 0.6) % 3600;
+    return state.rotation;
+  }
+
+  function drawPivot(c, x, y) {
+    c.save();
+    c.strokeStyle = K.alpha("#2b7de9", 0.9);
+    c.lineWidth = 1;
+    c.beginPath();
+    c.moveTo(x - 9, y);
+    c.lineTo(x + 9, y);
+    c.moveTo(x, y - 9);
+    c.lineTo(x, y + 9);
+    c.stroke();
+    c.fillStyle = "#ffffff";
+    c.beginPath();
+    c.arc(x, y, 4, 0, Math.PI * 2);
+    c.fill();
+    c.strokeStyle = "#2b7de9";
+    c.lineWidth = 1.5;
+    c.stroke();
+    c.restore();
+  }
+
+  function drawScene(c, t, forceAuto) {
+    c.clearRect(0, 0, W, H);
+
+    checker(c, 60, 42, 200, 156);
+
+    c.save();
+    c.setLineDash([4, 4]);
+    c.strokeStyle = "#8a929c";
+    c.lineWidth = 1;
+    c.strokeRect(IX + 0.5, IY + 0.5, IW - 1, IH - 1);
+    c.restore();
+
+    var rot = rotationAt(t, forceAuto);
+    var s = state.zoom / 256;
+
+    c.save();
+    c.globalAlpha = state.opa / 100;
+    c.imageSmoothingEnabled = state.aa;
+    c.translate(IX, IY);
+    c.translate(state.px, state.py);
+    c.rotate(K.rad(rot / 10));
+    c.scale(s, s);
+    c.translate(-state.px, -state.py);
+    c.drawImage(getImage(), state.offx, state.offy, IW, IH);
+    c.restore();
+
+    drawPivot(c, IX + state.px, IY + state.py);
+
+    K.text(c, "源图 160×120 · 程序化风景", 10, 14, { size: 11, color: K.theme.textFaint });
+    if (forceAuto || state.auto) {
+      K.text(c, "自动旋转 60°/s", W - 10, 14, { size: 10.5, color: "#2b7de9", align: "right" });
+    } else {
+      K.text(c, "rotation " + (rot / 10).toFixed(1) + "°", W - 10, 14, {
+        size: 10.5, color: K.theme.textFaint, align: "right", mono: true
+      });
+    }
+    K.text(c, "棋盘格 = 透明区域 · 虚线 = 原始轮廓", W / 2, 232, {
+      size: 10.5, color: K.theme.textFaint, align: "center"
+    });
+  }
+
+  K.run(function () {
+    drawScene(view.ctx, performance.now() - t0, false);
+  });
+
+  function renderCode() {
+    var L = [];
+    L.push(K.cm("/* 由页面参数实时生成 · 源图 160×120 ARGB8888 */"));
+    L.push("lv_obj_t * img = " + K.fn("lv_image_create") + "(lv_screen_active());");
+    L.push(K.fn("lv_image_set_src") + "(img, &landscape_dsc);");
+    L.push(K.fn("lv_obj_set_size") + "(img, " + K.num(IW) + ", " + K.num(IH) + ");");
+    L.push(K.fn("lv_obj_center") + "(img);");
+    L.push("");
+    L.push(K.fn("lv_image_set_pivot") + "(img, " + K.num(state.px) + ", " + K.num(state.py) + ");");
+    L.push(K.fn("lv_image_set_scale") + "(img, " + K.num(state.zoom) + ");   " + K.cm("/* 256 = 100% */"));
+    L.push(K.fn("lv_image_set_rotation") + "(img, " + K.num(state.rotation) + ");   " + K.cm("/* 单位 0.1° */"));
+    L.push(K.fn("lv_image_set_offset_x") + "(img, " + K.num(state.offx) + ");");
+    L.push(K.fn("lv_image_set_offset_y") + "(img, " + K.num(state.offy) + ");");
+    L.push(K.fn("lv_image_set_antialias") + "(img, " + (state.aa ? "true" : "false") + ");");
+    L.push("");
+    L.push(K.fn("lv_obj_set_style_image_recolor") + "(img, " + K.fn("lv_color_hex") + "(" + K.num(K.hexCode(state.recolor)) + "), 0);");
+    L.push(K.fn("lv_obj_set_style_image_recolor_opa") + "(img, " + K.num(state.recolorOpa) + ", 0);");
+    L.push(K.fn("lv_obj_set_style_image_opa") + "(img, " + K.num(Math.round(state.opa / 100 * 255)) + ", 0);");
+    if (state.auto) {
+      L.push("");
+      L.push(K.cm("/* 自动旋转：定时调用 lv_image_set_rotation(img, angle * 10)，angle 为度 */"));
+    }
+    K.code(L);
+  }
+
+  K.bindRange("rotation", function (v) { return (v / 10).toFixed(1) + "°"; }, function (v) {
+    state.rotation = v;
+    renderCode();
+  });
+  K.bindRange("zoom", function (v) {
+    return v + "（" + Math.round(v / 256 * 100) + "%）";
+  }, function (v) {
+    state.zoom = v;
+    renderCode();
+  });
+  K.bindRange("px", function (v) { return v; }, function (v) { state.px = v; renderCode(); });
+  K.bindRange("py", function (v) { return v; }, function (v) { state.py = v; renderCode(); });
+  K.bindRange("offx", function (v) { return v + " px"; }, function (v) { state.offx = v; renderCode(); });
+  K.bindRange("offy", function (v) { return v + " px"; }, function (v) { state.offy = v; renderCode(); });
+  K.bindRange("recoloropa", function (v) { return v; }, function (v) {
+    state.recolorOpa = v;
+    renderCode();
+  });
+  K.bindRange("opa", function (v) { return v + "%"; }, function (v) {
+    state.opa = v;
+    renderCode();
+  });
+
+  document.getElementById("recolor").addEventListener("input", function (e) {
+    state.recolor = e.target.value;
+    renderCode();
+  });
+  K.bindCheck("aa", function (v) {
+    state.aa = v;
+    renderCode();
+  });
+  K.bindCheck("auto", function (v) {
+    state.auto = v;
+    renderCode();
+  });
+
+  document.getElementById("btn-png").addEventListener("click", function () {
+    K.exportPng(view.canvas, "image.png");
+  });
+
+  document.getElementById("btn-gif").addEventListener("click", function () {
+    var btn = this;
+    btn.disabled = true;
+    K.exportGif({
+      name: "image.gif", w: W, h: H, fps: 15, duration: 6000,
+      frame: function (c, t) {
+        drawScene(c, t, true);
+      },
+      onDone: function () { btn.disabled = false; },
+      onError: function () { btn.disabled = false; }
+    });
+  });
+
+  document.getElementById("btn-webm").addEventListener("click", function () {
+    var btn = this;
+    btn.disabled = true;
+    K.exportWebm({
+      canvas: view.canvas, name: "image.webm", duration: 6000,
+      before: function () {
+        var old = state.auto;
+        state.auto = true;
+        return old;
+      },
+      after: function (old) { state.auto = old; },
+      onDone: function () { btn.disabled = false; },
+      onError: function () { btn.disabled = false; }
+    });
+  });
+
+  renderCode();
+})();
+</script>

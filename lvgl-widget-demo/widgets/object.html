@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LVGL Base Object 复刻与导出</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='6' y='7' width='20' height='18' rx='4' fill='%232b7de9'/%3E%3Crect x='10' y='11' width='12' height='10' rx='2' fill='%23fff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="../assets/panel.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <a class="back" href="../index.html">← 返回画廊</a>
+    <h1>LVGL Base Object 本地复刻</h1>
+    <p>基类对象 160×110 居中，内嵌子对象。尺寸、圆角、背景 / 边框 / 阴影、整体不透明度、旋转、缩放与内边距实时联动；按住对象拖动即可改变 <code>lv_obj_set_pos()</code>。</p>
+  </header>
+
+  <div class="stage">
+    <div class="stage-canvas-box"><canvas id="view"></canvas></div>
+  </div>
+
+  <section class="panel">
+    <h2>参数（对应 LVGL 接口）</h2>
+    <div class="grid">
+      <div class="field">
+        <label>宽度 set_size <output id="o-w">160 px</output></label>
+        <input type="range" id="w" min="100" max="260" step="2" value="160">
+      </div>
+      <div class="field">
+        <label>高度 set_size <output id="o-h">110 px</output></label>
+        <input type="range" id="h" min="70" max="190" step="2" value="110">
+      </div>
+
+      <div class="field">
+        <label>圆角 radius <output id="o-radius">14 px</output></label>
+        <input type="range" id="radius" min="0" max="60" step="1" value="14">
+      </div>
+      <div class="field">
+        <label>内边距 pad_all <output id="o-pad">12 px</output></label>
+        <input type="range" id="pad" min="0" max="30" step="1" value="12">
+      </div>
+
+      <div class="field">
+        <label>背景色 bg_color</label>
+        <input type="color" id="bg" value="#2b7de9">
+      </div>
+      <div class="field">
+        <label>背景不透明度 bg_opa <output id="o-bgopa">255</output></label>
+        <input type="range" id="bgopa" min="0" max="255" step="1" value="255">
+      </div>
+
+      <div class="field">
+        <label>边框宽度 border_width <output id="o-border">2 px</output></label>
+        <input type="range" id="border" min="0" max="8" step="1" value="2">
+      </div>
+      <div class="field">
+        <label>边框颜色 border_color</label>
+        <input type="color" id="borderc" value="#1f6fd0">
+      </div>
+
+      <div class="field">
+        <label>阴影宽度 shadow_width <output id="o-shadow">18 px</output></label>
+        <input type="range" id="shadow" min="0" max="40" step="1" value="18">
+      </div>
+      <div class="field">
+        <label>阴影颜色 shadow_color</label>
+        <input type="color" id="shadowc" value="#2b7de9">
+      </div>
+
+      <div class="field">
+        <label>阴影偏移 shadow_offset_y <output id="o-shadY">6 px</output></label>
+        <input type="range" id="shadY" min="-20" max="20" step="1" value="6">
+      </div>
+      <div class="field">
+        <label>整体不透明度 opa <output id="o-opa">255</output></label>
+        <input type="range" id="opa" min="0" max="255" step="1" value="255">
+      </div>
+
+      <div class="field">
+        <label>旋转 transform_rotation <output id="o-rot">0°</output></label>
+        <input type="range" id="rot" min="-180" max="180" step="1" value="0">
+      </div>
+      <div class="field">
+        <label>缩放 transform_scale <output id="o-scale">256</output></label>
+        <input type="range" id="scale" min="128" max="512" step="8" value="256">
+      </div>
+
+      <div class="field wide">
+        <label>显示子对象</label>
+        <div class="check"><input type="checkbox" id="child" checked><span>子对象尺寸随 pad_all 与边框宽度收缩</span></div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button type="button" class="btn" id="btn-reset">重置位置</button>
+      <button type="button" class="btn primary" id="btn-png">导出 PNG</button>
+    </div>
+    <div class="status" id="status"></div>
+  </section>
+
+  <pre class="code" id="code"></pre>
+
+  <footer>画布尺寸 320×240。本页为静态演示，提供 PNG 导出（GIF 需联网，WebM 离线可用，本页未启用）；阴影与旋转在画布上实时重绘。</footer>
+</div>
+
+<script src="../assets/widget-kit.js"></script>
+<script>
+(function () {
+  "use strict";
+  var K = LVKit, W = 320, H = 240, BODY_CY = 112;
+
+  var state = {
+    w: 160, h: 110,
+    radius: 14,
+    pad: 12,
+    bg: "#2b7de9",
+    bgOpa: 255,
+    borderW: 2,
+    borderColor: "#1f6fd0",
+    shadowW: 18,
+    shadowColor: "#2b7de9",
+    shadowY: 6,
+    opa: 255,
+    rot: 0,
+    scale: 256,
+    showChild: true
+  };
+  var drag = { x: 0, y: 0 };
+
+  var view = K.view(document.getElementById("view"));
+  view.resize(W, H);
+  var dpr = view.dpr || 1;
+
+  var layer = document.createElement("canvas");
+  layer.width = Math.round(W * dpr);
+  layer.height = Math.round(H * dpr);
+  var lctx = layer.getContext("2d");
+  lctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  function drawObjectLayer(c) {
+    c.clearRect(0, 0, W, H);
+    var w = state.w, h = state.h;
+    var r = Math.min(state.radius, w / 2, h / 2);
+    var x = -w / 2, y = -h / 2;
+    var inset = state.borderW + state.pad;
+
+    c.save();
+    c.translate(W / 2 + drag.x, BODY_CY + drag.y);
+    c.rotate(K.rad(state.rot));
+    c.scale(state.scale / 256, state.scale / 256);
+    c.globalAlpha = state.opa / 255;
+
+    c.fillStyle = K.alpha(state.bg, state.bgOpa / 255);
+    K.roundRectPath(c, x, y, w, h, r);
+    c.fill();
+
+    if (state.borderW > 0) {
+      c.save();
+      c.strokeStyle = state.borderColor;
+      c.lineWidth = state.borderW;
+      K.roundRectPath(c, x + state.borderW / 2, y + state.borderW / 2,
+        Math.max(0, w - state.borderW), Math.max(0, h - state.borderW),
+        Math.max(0, r - state.borderW / 2));
+      c.stroke();
+      c.restore();
+    }
+
+    var cw = w - inset * 2;
+    var ch = h - inset * 2;
+    if (state.showChild && cw >= 12 && ch >= 12) {
+      var chx = x + inset, chy = y + inset;
+      c.save();
+      c.fillStyle = "#ffffff";
+      K.roundRectPath(c, chx, chy, cw, ch, 8);
+      c.fill();
+      c.strokeStyle = K.alpha("#2b7de9", 0.55);
+      c.lineWidth = 1;
+      K.roundRectPath(c, chx + 0.5, chy + 0.5, Math.max(0, cw - 1), Math.max(0, ch - 1), 8);
+      c.stroke();
+      c.restore();
+
+      if (cw > 66 && ch > 30) {
+        K.text(c, "child", chx + cw / 2, chy + ch / 2 - (ch > 46 ? 8 : 0), {
+          size: 12, weight: 600, color: "#2b7de9", align: "center"
+        });
+        if (ch > 46) {
+          K.text(c, Math.round(cw) + "×" + Math.round(ch), chx + cw / 2, chy + ch / 2 + 9, {
+            size: 10, mono: true, color: "#8a929c", align: "center"
+          });
+        }
+      }
+    } else {
+      K.text(c, "obj", 0, 0, {
+        size: 13, weight: 600, color: K.alpha("#ffffff", 0.85), align: "center"
+      });
+    }
+    c.restore();
+  }
+
+  function drawScene(c) {
+    c.clearRect(0, 0, W, H);
+
+    c.save();
+    c.strokeStyle = "#eef0f3";
+    c.lineWidth = 1;
+    c.beginPath();
+    c.moveTo(W / 2, 8);
+    c.lineTo(W / 2, H - 8);
+    c.moveTo(8, BODY_CY);
+    c.lineTo(W - 8, BODY_CY);
+    c.stroke();
+    c.restore();
+
+    drawObjectLayer(lctx);
+
+    c.save();
+    if (state.shadowW > 0) {
+      c.shadowColor = K.alpha(state.shadowColor, 0.5);
+      c.shadowBlur = state.shadowW;
+      c.shadowOffsetY = state.shadowY;
+    }
+    c.drawImage(layer, 0, 0, W, H);
+    c.restore();
+
+    K.text(c, "lv_obj · 按住拖动", 10, 232, { size: 10.5, color: K.theme.textFaint });
+    K.text(c, "pos " + Math.round(drag.x) + ", " + Math.round(drag.y), W - 10, 232, {
+      size: 10.5, color: K.theme.textFaint, align: "right", mono: true
+    });
+  }
+
+  K.run(function () {
+    drawScene(view.ctx);
+  });
+
+  function toLocal(e) {
+    var rect = view.canvas.getBoundingClientRect();
+    return {
+      x: (e.clientX - rect.left) * (W / rect.width),
+      y: (e.clientY - rect.top) * (H / rect.height)
+    };
+  }
+
+  function hitTest(px, py) {
+    var dx = px - (W / 2 + drag.x);
+    var dy = py - (BODY_CY + drag.y);
+    var a = -K.rad(state.rot);
+    var rx = dx * Math.cos(a) - dy * Math.sin(a);
+    var ry = dx * Math.sin(a) + dy * Math.cos(a);
+    var s = state.scale / 256;
+    return Math.abs(rx / s) <= state.w / 2 && Math.abs(ry / s) <= state.h / 2;
+  }
+
+  var dragging = false;
+  var startPt = { x: 0, y: 0 };
+  var startDrag = { x: 0, y: 0 };
+
+  view.canvas.style.cursor = "grab";
+  view.canvas.addEventListener("pointerdown", function (e) {
+    var p = toLocal(e);
+    if (!hitTest(p.x, p.y)) return;
+    dragging = true;
+    startPt = p;
+    startDrag = { x: drag.x, y: drag.y };
+    view.canvas.setPointerCapture(e.pointerId);
+    view.canvas.style.cursor = "grabbing";
+  });
+  view.canvas.addEventListener("pointermove", function (e) {
+    if (!dragging) return;
+    var p = toLocal(e);
+    drag.x = K.clamp(startDrag.x + p.x - startPt.x, -W, W);
+    drag.y = K.clamp(startDrag.y + p.y - startPt.y, -H, H);
+    renderCode();
+  });
+  function endDrag() {
+    dragging = false;
+    view.canvas.style.cursor = "grab";
+  }
+  view.canvas.addEventListener("pointerup", endDrag);
+  view.canvas.addEventListener("pointercancel", endDrag);
+
+  function renderCode() {
+    var posX = Math.round(W / 2 + drag.x - state.w / 2);
+    var posY = Math.round(BODY_CY + drag.y - state.h / 2);
+    var inset = state.borderW + state.pad;
+    var cw = Math.max(1, state.w - inset * 2);
+    var ch = Math.max(1, state.h - inset * 2);
+    var L = [];
+
+    L.push(K.cm("/* 由页面参数实时生成 */"));
+    L.push("lv_obj_t * obj = " + K.fn("lv_obj_create") + "(lv_screen_active());");
+    L.push(K.fn("lv_obj_set_size") + "(obj, " + K.num(state.w) + ", " + K.num(state.h) + ");");
+    L.push(K.fn("lv_obj_set_pos") + "(obj, " + K.num(posX) + ", " + K.num(posY) + ");");
+    L.push("");
+    L.push(K.fn("lv_obj_set_style_radius") + "(obj, " + K.num(state.radius) + ", 0);");
+    L.push(K.fn("lv_obj_set_style_bg_color") + "(obj, " + K.fn("lv_color_hex") + "(" + K.num(K.hexCode(state.bg)) + "), 0);");
+    L.push(K.fn("lv_obj_set_style_bg_opa") + "(obj, " + K.num(state.bgOpa) + ", 0);");
+    L.push(K.fn("lv_obj_set_style_border_width") + "(obj, " + K.num(state.borderW) + ", 0);");
+    L.push(K.fn("lv_obj_set_style_border_color") + "(obj, " + K.fn("lv_color_hex") + "(" + K.num(K.hexCode(state.borderColor)) + "), 0);");
+    L.push(K.fn("lv_obj_set_style_shadow_width") + "(obj, " + K.num(state.shadowW) + ", 0);");
+    L.push(K.fn("lv_obj_set_style_shadow_color") + "(obj, " + K.fn("lv_color_hex") + "(" + K.num(K.hexCode(state.shadowColor)) + "), 0);");
+    L.push(K.fn("lv_obj_set_style_shadow_opa") + "(obj, LV_OPA_50, 0);");
+    L.push(K.fn("lv_obj_set_style_shadow_offset_y") + "(obj, " + K.num(state.shadowY) + ", 0);");
+    L.push(K.fn("lv_obj_set_style_opa") + "(obj, " + K.num(state.opa) + ", 0);");
+    L.push(K.fn("lv_obj_set_style_transform_rotation") + "(obj, " + K.num(state.rot * 10) + ", 0);   " + K.cm("/* 单位 0.1° */"));
+    L.push(K.fn("lv_obj_set_style_transform_scale_x") + "(obj, " + K.num(state.scale) + ", 0);");
+    L.push(K.fn("lv_obj_set_style_transform_scale_y") + "(obj, " + K.num(state.scale) + ", 0);");
+    L.push(K.fn("lv_obj_set_style_pad_all") + "(obj, " + K.num(state.pad) + ", 0);");
+
+    if (state.showChild) {
+      L.push("");
+      L.push(K.cm("/* 子对象：尺寸 = 父对象 - 2 × (border_width + pad_all) */"));
+      L.push("lv_obj_t * child = " + K.fn("lv_obj_create") + "(obj);");
+      L.push(K.fn("lv_obj_set_size") + "(child, " + K.num(cw) + ", " + K.num(ch) + ");");
+      L.push(K.fn("lv_obj_set_pos") + "(child, " + K.num(inset) + ", " + K.num(inset) + ");");
+      L.push(K.fn("lv_obj_set_style_bg_color") + "(child, " + K.fn("lv_color_hex") + "(" + K.num("0xffffff") + "), 0);");
+      L.push(K.fn("lv_obj_set_style_radius") + "(child, " + K.num(8) + ", 0);");
+      L.push(K.fn("lv_obj_set_style_border_width") + "(child, " + K.num(1) + ", 0);");
+      L.push(K.fn("lv_obj_set_style_border_color") + "(child, " + K.fn("lv_color_hex") + "(" + K.num("0x2b7de9") + "), 0);");
+    }
+    K.code(L);
+  }
+
+  function bindRange(id, key, fmt) {
+    return K.bindRange(id, fmt, function (v) {
+      state[key] = v;
+      renderCode();
+    });
+  }
+
+  bindRange("w", "w", function (v) { return v + " px"; });
+  bindRange("h", "h", function (v) { return v + " px"; });
+  bindRange("radius", "radius", function (v) { return v + " px"; });
+  bindRange("pad", "pad", function (v) { return v + " px"; });
+  bindRange("bgopa", "bgOpa", function (v) { return v; });
+  bindRange("border", "borderW", function (v) { return v + " px"; });
+  bindRange("shadow", "shadowW", function (v) { return v + " px"; });
+  bindRange("shadY", "shadowY", function (v) { return v + " px"; });
+  bindRange("opa", "opa", function (v) { return v; });
+  bindRange("rot", "rot", function (v) { return v + "°"; });
+  bindRange("scale", "scale", function (v) { return v; });
+
+  document.getElementById("bg").addEventListener("input", function (e) {
+    state.bg = e.target.value;
+    renderCode();
+  });
+  document.getElementById("borderc").addEventListener("input", function (e) {
+    state.borderColor = e.target.value;
+    renderCode();
+  });
+  document.getElementById("shadowc").addEventListener("input", function (e) {
+    state.shadowColor = e.target.value;
+    renderCode();
+  });
+  K.bindCheck("child", function (v) {
+    state.showChild = v;
+    renderCode();
+  });
+
+  document.getElementById("btn-reset").addEventListener("click", function () {
+    drag.x = 0;
+    drag.y = 0;
+    renderCode();
+    K.status("位置已重置为居中", true);
+  });
+  document.getElementById("btn-png").addEventListener("click", function () {
+    K.exportPng(view.canvas, "object.png");
+  });
+
+  renderCode();
+})();
+</script>
+</body>
+</html>

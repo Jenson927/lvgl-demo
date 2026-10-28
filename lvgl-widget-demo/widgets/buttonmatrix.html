@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LVGL Button Matrix 复刻与导出</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cg fill='%232b7de9'%3E%3Crect x='4' y='4' width='7' height='7' rx='2'/%3E%3Crect x='13' y='4' width='7' height='7' rx='2'/%3E%3Crect x='22' y='4' width='6' height='7' rx='2'/%3E%3Crect x='4' y='13' width='7' height='7' rx='2'/%3E%3Crect x='13' y='13' width='7' height='7' rx='2'/%3E%3Crect x='22' y='13' width='6' height='7' rx='2'/%3E%3Crect x='4' y='22' width='7' height='6' rx='2'/%3E%3Crect x='13' y='22' width='7' height='6' rx='2'/%3E%3Crect x='22' y='22' width='6' height='6' rx='2'/%3E%3C/g%3E%3C/svg%3E">
+<link rel="stylesheet" href="../assets/panel.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <a class="back" href="../index.html">← 返回画廊</a>
+    <h1>LVGL Button Matrix 本地复刻</h1>
+    <p>按钮矩阵支持单选 / 多选、禁用与最后一列加宽，参数对齐 <code>lv_buttonmatrix_set_map()</code> / <code>lv_buttonmatrix_set_one_checked()</code>，点击画布按钮即可选中。</p>
+  </header>
+
+  <div class="stage">
+    <div class="stage-canvas-box"><canvas id="view"></canvas></div>
+  </div>
+
+  <section class="panel">
+    <h2>参数（对应 LVGL 接口）</h2>
+    <div class="grid">
+      <div class="field wide">
+        <label>矩阵尺寸</label>
+        <div class="seg" id="gridsize">
+          <button type="button" data-val="2">2×2</button>
+          <button type="button" data-val="3" class="active">3×3</button>
+          <button type="button" data-val="4">4×4</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>单选 set_one_checked</label>
+        <div class="check"><input type="checkbox" id="one" checked><span>同一时间只允许一个按钮选中</span></div>
+      </div>
+      <div class="field">
+        <label>显示按钮边框</label>
+        <div class="check"><input type="checkbox" id="borders" checked><span>关闭后按钮无描边</span></div>
+      </div>
+      <div class="field">
+        <label>选中按钮 id <output id="o-sel">0</output></label>
+        <input type="range" id="sel" min="0" max="8" step="1" value="0">
+      </div>
+      <div class="field">
+        <label>禁用按钮 id <output id="o-dis">4</output></label>
+        <input type="range" id="dis" min="-1" max="8" step="1" value="4">
+      </div>
+      <div class="field wide">
+        <label>最后一列 1.5 倍宽</label>
+        <div class="check"><input type="checkbox" id="wide"><span>取消 / 勾选可对比 set_button_width 效果</span></div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button type="button" class="btn primary" id="btn-png">导出 PNG</button>
+    </div>
+    <div class="status" id="status"></div>
+  </section>
+
+  <pre class="code" id="code"></pre>
+
+  <footer>画布尺寸 320×240。静态页面，导出 PNG 即可留档；点击画布按钮可切换选中状态，禁用按钮不响应点击。</footer>
+</div>
+
+<script src="../assets/widget-kit.js"></script>
+<script>
+(function () {
+  "use strict";
+  var K = LVKit, W = 320, H = 240;
+
+  var state = { grid: 3, one: true, sel: 0, dis: 4, borders: true, wide: false };
+  var selected = [0];
+  var pressedId = -1;
+  var pressedAt = -9999;
+  var rects = [];
+
+  var view = K.view(document.getElementById("view"));
+  view.resize(W, H);
+
+  function count() { return state.grid * state.grid; }
+
+  function isSel(id) {
+    for (var i = 0; i < selected.length; i++) if (selected[i] === id) return true;
+    return false;
+  }
+
+  function geom() {
+    var rows = state.grid, cols = state.grid;
+    var cardX = 24, cardY = 22, cardW = 272, cardH = 196;
+    var pad = 12, gap = 8;
+    var innerW = cardW - 2 * pad;
+    var innerH = cardH - 2 * pad;
+    var rowH = (innerH - (rows - 1) * gap) / rows;
+    var unit, lastW;
+    if (state.wide && cols > 1) {
+      unit = (innerW - (cols - 1) * gap) / (cols - 1 + 1.5);
+      lastW = unit * 1.5;
+    } else {
+      unit = (innerW - (cols - 1) * gap) / cols;
+      lastW = unit;
+    }
+    return {
+      cols: cols, rows: rows, cardX: cardX, cardY: cardY, cardW: cardW, cardH: cardH,
+      pad: pad, gap: gap, unit: unit, lastW: lastW, rowH: rowH,
+      innerX: cardX + pad, innerY: cardY + pad
+    };
+  }
+
+  /* ---------- 绘制 ---------- */
+  function draw() {
+    var c = view.ctx;
+    var g = geom();
+    c.clearRect(0, 0, W, H);
+    c.fillStyle = "#ffffff";
+    c.fillRect(0, 0, W, H);
+
+    K.box(c, g.cardX, g.cardY, g.cardW, g.cardH, {
+      bg: "#f7f8fa", radius: 14, borderWidth: 1, border: "#e2e6eb"
+    });
+
+    rects = [];
+    var n = count();
+    var fsz = state.grid === 2 ? 22 : (state.grid === 3 ? 19 : 16);
+
+    for (var r = 0; r < g.rows; r++) {
+      for (var col = 0; col < g.cols; col++) {
+        var id = r * g.cols + col;
+        if (id >= n) continue;
+        var bw = (col === g.cols - 1) ? g.lastW : g.unit;
+        var bx = g.innerX + col * (g.unit + g.gap);
+        var by = g.innerY + r * (g.rowH + g.gap);
+
+        var disabled = (id === state.dis);
+        var checked = isSel(id) && !disabled;
+        var pressed = (pressedId === id && performance.now() - pressedAt < 140);
+
+        var bg, fg, border, borderW;
+        if (disabled) {
+          bg = "#eef1f4"; fg = "#b8bfc9"; border = "#e0e4e9"; borderW = state.borders ? 1.5 : 0;
+        } else if (checked) {
+          bg = pressed ? K.shade(K.theme.primary, -0.12) : K.theme.primary;
+          fg = "#ffffff"; border = K.theme.primary; borderW = 1.5;
+        } else {
+          bg = state.borders ? "#ffffff" : "#eef1f4";
+          fg = K.theme.text; border = "#d6d9df"; borderW = state.borders ? 1.5 : 0;
+        }
+
+        K.box(c, bx, by, bw, g.rowH, {
+          bg: bg, radius: 9, borderWidth: borderW, border: border,
+          shadow: (state.borders && !checked) ? K.alpha("#1c2128", 0.05) : null,
+          shadowBlur: 4, shadowY: 1
+        });
+
+        K.text(c, String(id + 1), bx + bw / 2, by + g.rowH / 2 + 1, {
+          size: fsz, weight: checked ? 600 : 500, color: fg, align: "center"
+        });
+
+        rects.push({ id: id, x: bx, y: by, w: bw, h: g.rowH });
+      }
+    }
+
+    K.text(c, "点击按钮选中 / 取消，禁用按钮不响应", W / 2, H - 12, {
+      size: 11, color: K.theme.textFaint, align: "center"
+    });
+  }
+
+  K.run(function () { draw(); });
+
+  /* ---------- 交互 ---------- */
+  function posOf(e) {
+    var r = view.canvas.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  }
+
+  view.canvas.addEventListener("pointerdown", function (e) {
+    var p = posOf(e);
+    var found = null;
+    for (var i = rects.length - 1; i >= 0; i--) {
+      var b = rects[i];
+      if (p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h) { found = b; break; }
+    }
+    if (!found || found.id === state.dis) return;
+
+    pressedId = found.id;
+    pressedAt = performance.now();
+    state.sel = found.id;
+
+    if (state.one) {
+      selected = [found.id];
+    } else {
+      var idx = -1;
+      for (var j = 0; j < selected.length; j++) if (selected[j] === found.id) idx = j;
+      if (idx >= 0) selected.splice(idx, 1);
+      else selected.push(found.id);
+    }
+    syncSelUI();
+    renderCode();
+  });
+
+  function syncSelUI() {
+    var el = document.getElementById("sel");
+    el.value = state.sel;
+    document.getElementById("o-sel").textContent = state.sel;
+  }
+
+  /* ---------- 参数 ---------- */
+  function syncLimits() {
+    var n = count();
+    var selEl = document.getElementById("sel");
+    var disEl = document.getElementById("dis");
+    if (state.sel > n - 1) state.sel = n - 1;
+    if (state.dis > n - 1) state.dis = -1;
+    selEl.max = n - 1;
+    disEl.max = n - 1;
+    selEl.value = state.sel;
+    disEl.value = state.dis;
+    document.getElementById("o-sel").textContent = state.sel;
+    document.getElementById("o-dis").textContent = state.dis < 0 ? "-1（无）" : state.dis;
+    selected = selected.filter(function (id) { return id < n && id !== state.dis; });
+    if (state.one) selected = (state.sel === state.dis) ? [] : [state.sel];
+  }
+
+  K.bindSeg("gridsize", function (v) {
+    state.grid = Number(v);
+    syncLimits();
+    renderCode();
+  });
+
+  K.bindCheck("one", function (on) {
+    state.one = on;
+    if (on) selected = (state.sel === state.dis) ? [] : [state.sel];
+    renderCode();
+  });
+
+  K.bindCheck("borders", function (on) { state.borders = on; renderCode(); });
+  K.bindCheck("wide", function (on) { state.wide = on; renderCode(); });
+
+  K.bindRange("sel", null, function (v) {
+    state.sel = v;
+    selected = (v === state.dis) ? [] : [v];
+    renderCode();
+  });
+
+  K.bindRange("dis", function (v) { return v < 0 ? "-1（无）" : v; }, function (v) {
+    state.dis = v;
+    selected = selected.filter(function (id) { return id !== v; });
+    if (state.one && state.sel !== v) selected = [state.sel];
+    if (state.sel === v) selected = [];
+    renderCode();
+  });
+
+  /* ---------- C 代码 ---------- */
+  function renderCode() {
+    var n = count();
+    var g = state.grid;
+    var mapName = "map_" + g + "x" + g;
+    var items = [];
+    for (var i = 0; i < n; i++) {
+      items.push(JSON.stringify(String(i + 1)));
+      if ((i + 1) % g === 0 && i !== n - 1) items.push("\"\\n\"");
+    }
+    items.push("\"\"");
+
+    var L = [];
+    L.push(K.cm("/* 由页面参数实时生成 */"));
+    L.push("static const char * const " + mapName + "[] = {" + items.join(", ") + "};");
+    L.push("");
+    L.push("lv_obj_t * btnm = " + K.fn("lv_buttonmatrix_create") + "(lv_screen_active());");
+    L.push(K.fn("lv_obj_set_size") + "(btnm, " + K.num(272) + ", " + K.num(196) + ");");
+    L.push(K.fn("lv_obj_center") + "(btnm);");
+    L.push(K.fn("lv_buttonmatrix_set_map") + "(btnm, " + mapName + ");");
+    L.push(K.fn("lv_buttonmatrix_set_button_ctrl_all") + "(btnm, " +
+      (state.wide ? K.num("LV_BUTTONMATRIX_CTRL_WIDTH_2") + " | " : "") +
+      K.num("LV_BUTTONMATRIX_CTRL_CHECKABLE") + ");");
+    L.push(K.fn("lv_buttonmatrix_set_one_checked") + "(btnm, " + K.num(state.one ? "true" : "false") + ");");
+
+    if (state.wide) {
+      for (var r = 0; r < g; r++) {
+        L.push(K.fn("lv_buttonmatrix_set_button_width") + "(btnm, " + K.num(r * g + g - 1) + ", " + K.num(3) + ");" +
+          K.cm("  /* 最后一列 1.5 倍 */"));
+      }
+    }
+
+    if (state.dis >= 0) {
+      L.push(K.fn("lv_buttonmatrix_set_button_ctrl") + "(btnm, " + K.num(state.dis) + ", " +
+        K.num("LV_BUTTONMATRIX_CTRL_DISABLED") + ");");
+    }
+
+    if (selected.length) {
+      L.push(K.fn("lv_buttonmatrix_set_selected_button") + "(btnm, " + K.num(state.sel) + ");");
+      for (var s = 0; s < selected.length; s++) {
+        if (selected[s] !== state.sel) {
+          L.push(K.fn("lv_buttonmatrix_set_button_ctrl") + "(btnm, " + K.num(selected[s]) + ", " +
+            K.num("LV_BUTTONMATRIX_CTRL_CHECKED") + ");");
+        }
+      }
+    }
+
+    if (!state.borders) {
+      L.push(K.fn("lv_obj_set_style_border_width") + "(btnm, " + K.num(0) + ", LV_PART_ITEMS);");
+    }
+    L.push(K.fn("lv_obj_set_style_bg_color") + "(btnm, " + K.fn("lv_color_hex") + "(" + K.num("0x2b7de9") + "), " +
+      K.num("LV_PART_ITEMS") + " | LV_STATE_CHECKED);");
+    K.code(L);
+  }
+
+  /* ---------- 导出 ---------- */
+  document.getElementById("btn-png").addEventListener("click", function () {
+    K.exportPng(view.canvas, "buttonmatrix.png");
+  });
+
+  syncLimits();
+  renderCode();
+})();
+</script>
+</body>
+</html>

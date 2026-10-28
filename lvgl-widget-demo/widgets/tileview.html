@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LVGL Tileview 复刻与导出</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='4' y='4' width='24' height='24' rx='6' fill='%232b7de9'/%3E%3Cpath d='M11 4v24M21 4v24M4 11h24M4 21h24' stroke='%23fff' stroke-width='1.6'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="../assets/panel.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <a class="back" href="../index.html">← 返回画廊</a>
+    <h1>LVGL Tileview 本地复刻</h1>
+    <p>3×3 平铺瓦片，支持双向拖动与吸附，参数对齐 <code>lv_tileview_add_tile()</code> / <code>lv_tileview_set_tile_by_index()</code>，可导出 GIF / WebM / PNG。</p>
+  </header>
+
+  <div class="stage">
+    <div class="stage-canvas-box"><canvas id="view"></canvas></div>
+  </div>
+
+  <section class="panel">
+    <h2>参数（对应 LVGL 接口）</h2>
+    <div class="grid">
+      <div class="field wide">
+        <label>启用方向 lv_tileview_add_tile(dir)</label>
+        <div class="seg" id="dir">
+          <button type="button" data-val="all" class="active">全部</button>
+          <button type="button" data-val="hor">仅水平</button>
+          <button type="button" data-val="ver">仅垂直</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>动画时长 anim_duration <output id="o-dur">320 ms</output></label>
+        <input type="range" id="dur" min="100" max="800" step="20" value="320">
+      </div>
+      <div class="field">
+        <label>瓦片数量（每边）<output id="o-count">3</output></label>
+        <input type="range" id="count" min="2" max="3" step="1" value="3">
+      </div>
+      <div class="field">
+        <label>自动巡游演示</label>
+        <div class="check"><input type="checkbox" id="auto" checked><span>按路径循环切换瓦片</span></div>
+      </div>
+      <div class="field">
+        <label>显示网格线</label>
+        <div class="check"><input type="checkbox" id="grid"><span>显示瓦片边界辅助线</span></div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button type="button" class="btn primary" id="btn-gif">导出 GIF</button>
+      <button type="button" class="btn" id="btn-webm">录制 WebM</button>
+      <button type="button" class="btn" id="btn-png">导出 PNG</button>
+    </div>
+    <div class="status" id="status"></div>
+  </section>
+
+  <pre class="code" id="code"></pre>
+
+  <footer>画布尺寸 320×240。GIF 编码由 gif.js（jsDelivr CDN）完成，需联网；WebM 使用浏览器原生 MediaRecorder，离线可用。</footer>
+</div>
+
+<script src="../assets/widget-kit.js"></script>
+<script>
+(function () {
+  "use strict";
+  var K = LVKit, W = 320, H = 240;
+  var COLORS = ["#2b7de9", "#1f9d66", "#e6a23c", "#e04b4b", "#7b61ff", "#00a6a6", "#e8763a", "#3a8ee6", "#2bb3a3"];
+  var DESC = [
+    "起始瓦片，可向右 / 向下拖动", "顶部中间瓦片，左右可切换", "右上角瓦片，可向下移动",
+    "左侧中间瓦片，上下可切换", "中央瓦片，四个方向都可滑动", "右侧中间瓦片，上下可切换",
+    "左下角瓦片，可向上移动", "底部中间瓦片，左右可切换", "最后一块瓦片，拖动可回弹"
+  ];
+
+  var state = { count: 3, dir: "all", dur: 320, auto: true, grid: false };
+  var pos = { x: 0, y: 0 };
+  var anim = null;
+  var drag = null;
+  var t0 = performance.now();
+  var lastKey = "";
+
+  var view = K.view(document.getElementById("view"));
+  view.resize(W, H);
+  var canvas = view.canvas;
+
+  function path() {
+    var n = state.count, out = [], c, r;
+    if (state.dir === "hor") {
+      for (c = 0; c < n; c++) out.push([c, 0]);
+    } else if (state.dir === "ver") {
+      for (r = 0; r < n; r++) out.push([0, r]);
+    } else {
+      for (r = 0; r < n; r++) {
+        if (r % 2 === 0) {
+          for (c = 0; c < n; c++) out.push([c, r]);
+        } else {
+          for (c = n - 1; c >= 0; c--) out.push([c, r]);
+        }
+      }
+    }
+    return out;
+  }
+
+  function stepDur() { return state.dur + 420; }
+
+  function tourPos(t) {
+    var p = path(), step = stepDur();
+    if (!p.length) return { x: 0, y: 0 };
+    if (!(t >= 0)) t = 0;
+    var i = Math.floor(t / step) % p.length;
+    if (i < 0) i += p.length;
+    var local = t % step;
+    var k = K.clamp(local / Math.max(1, state.dur), 0, 1);
+    var a = p[i], b = p[(i + 1) % p.length];
+    var e = K.ease(k);
+    return { x: K.lerp(a[0] * W, b[0] * W, e), y: K.lerp(a[1] * H, b[1] * H, e) };
+  }
+
+  function restartAuto() {
+    var p = path();
+    var col = K.clamp(Math.round(pos.x / W), 0, state.count - 1);
+    var row = K.clamp(Math.round(pos.y / H), 0, state.count - 1);
+    var idx = 0, i;
+    for (i = 0; i < p.length; i++) {
+      if (p[i][0] === col && p[i][1] === row) { idx = i; break; }
+    }
+    t0 = performance.now() - idx * stepDur();
+    anim = null;
+  }
+  function dirConst() {
+    if (state.dir === "hor") return "LV_DIR_HOR";
+    if (state.dir === "ver") return "LV_DIR_VER";
+    return "LV_DIR_ALL";
+  }
+
+  function drawTile(c, ox, oy, col, row) {
+    var idx = row * state.count + col;
+    var accent = COLORS[idx % COLORS.length];
+    var x = ox + 20, y = oy + 20, w = W - 40, h = H - 40;
+    c.save();
+    c.fillStyle = "#ffffff";
+    c.fillRect(ox, oy, W, H);
+    K.box(c, x, y, w, h, {
+      bg: "#ffffff", radius: 14, borderWidth: 1, border: "#e3e8ef",
+      shadow: K.alpha("#1c2128", 0.07), shadowBlur: 14, shadowY: 4
+    });
+    var tag = dirConst();
+    var tw = K.measure(c, tag, { size: 10, mono: true }) + 16;
+    K.box(c, x + 12, y + 12, tw, 19, { bg: K.alpha(accent, 0.12), radius: 9 });
+    K.text(c, tag, x + 20, y + 22, { size: 10, mono: true, color: accent });
+    K.text(c, (col + 1) + "·" + (row + 1), ox + W / 2, oy + H / 2 - 22, {
+      size: 54, weight: 700, color: accent, align: "center"
+    });
+    K.text(c, "第 " + (col + 1) + " 列 · 第 " + (row + 1) + " 行", ox + W / 2, oy + H / 2 + 32, {
+      size: 14, color: K.theme.text, align: "center"
+    });
+    K.text(c, DESC[idx] || "平铺瓦片", ox + W / 2, oy + H / 2 + 55, {
+      size: 11.5, color: K.theme.textFaint, align: "center"
+    });
+    c.restore();
+  }
+
+  function drawDots(c, col, row) {
+    var n = state.count, i, gap = 11, dotR = 3;
+    var pw = n * gap + 20;
+    var bx = W / 2 - pw / 2, by = H - 28;
+    K.box(c, bx, by, pw, 18, {
+      bg: "rgba(255,255,255,0.94)", radius: 9, borderWidth: 1, border: "#e3e8ef"
+    });
+    var start = bx + (pw - n * gap) / 2 + gap / 2;
+    for (i = 0; i < n; i++) {
+      c.beginPath();
+      c.arc(start + i * gap, by + 9, dotR, 0, Math.PI * 2);
+      c.fillStyle = i === col ? K.theme.primary : "#c9d0da";
+      c.fill();
+    }
+    var ph = n * gap + 12, px0 = W - 26, py0 = H / 2 - ph / 2;
+    K.box(c, px0, py0, 16, ph, {
+      bg: "rgba(255,255,255,0.94)", radius: 8, borderWidth: 1, border: "#e3e8ef"
+    });
+    for (i = 0; i < n; i++) {
+      c.beginPath();
+      c.arc(px0 + 8, py0 + 6 + gap / 2 + i * gap, dotR, 0, Math.PI * 2);
+      c.fillStyle = i === row ? K.theme.primary : "#c9d0da";
+      c.fill();
+    }
+  }
+
+  function activeTile(px, py) {
+    return {
+      col: K.clamp(Math.round(px / W), 0, state.count - 1),
+      row: K.clamp(Math.round(py / H), 0, state.count - 1)
+    };
+  }
+  function drawScene(c, px, py) {
+    c.clearRect(0, 0, W, H);
+    c.fillStyle = "#ffffff";
+    c.fillRect(0, 0, W, H);
+    var n = state.count, col, row, ox, oy;
+    for (row = 0; row < n; row++) {
+      for (col = 0; col < n; col++) {
+        ox = col * W - px;
+        oy = row * H - py;
+        if (ox <= -W || ox >= W || oy <= -H || oy >= H) continue;
+        drawTile(c, ox, oy, col, row);
+      }
+    }
+    if (state.grid) {
+      c.save();
+      c.strokeStyle = K.alpha("#2b7de9", 0.32);
+      c.setLineDash([5, 4]);
+      c.lineWidth = 1;
+      var i, gx, gy;
+      for (i = 0; i <= n; i++) {
+        gx = i * W - px;
+        if (gx >= 0 && gx <= W) {
+          c.beginPath(); c.moveTo(gx, 0); c.lineTo(gx, H); c.stroke();
+        }
+        gy = i * H - py;
+        if (gy >= 0 && gy <= H) {
+          c.beginPath(); c.moveTo(0, gy); c.lineTo(W, gy); c.stroke();
+        }
+      }
+      c.restore();
+    }
+    c.globalAlpha = 0.38;
+    K.text(c, "拖动切换瓦片 · 松手吸附", W / 2, 11, {
+      size: 10, color: K.theme.textMuted, align: "center"
+    });
+    c.globalAlpha = 1;
+    var a = activeTile(px, py);
+    drawDots(c, a.col, a.row);
+  }
+
+  function snapTo(col, row) {
+    var nx = col * W, ny = row * H;
+    if (Math.abs(nx - pos.x) < 0.5 && Math.abs(ny - pos.y) < 0.5) {
+      pos.x = nx; pos.y = ny; anim = null; return;
+    }
+    anim = { fx: pos.x, fy: pos.y, tx: nx, ty: ny, start: performance.now() };
+  }
+
+  function snapNearest() {
+    var a = activeTile(pos.x, pos.y);
+    snapTo(a.col, a.row);
+  }
+
+  function rubber(v, min, max) {
+    if (v < min) return min + (v - min) * 0.35;
+    if (v > max) return max + (v - max) * 0.35;
+    return v;
+  }
+
+  K.run(function (now) {
+    var t = now - t0;
+    if (state.auto && !drag) {
+      var p = tourPos(t);
+      pos.x = p.x; pos.y = p.y; anim = null;
+    } else if (anim) {
+      var k = K.clamp((now - anim.start) / Math.max(1, state.dur), 0, 1);
+      var e = K.ease(k);
+      pos.x = K.lerp(anim.fx, anim.tx, e);
+      pos.y = K.lerp(anim.fy, anim.ty, e);
+      if (k >= 1) { pos.x = anim.tx; pos.y = anim.ty; anim = null; }
+    }
+    drawScene(view.ctx, pos.x, pos.y);
+    syncCode();
+  });
+  function renderCode() {
+    var n = state.count, col, row;
+    var a = activeTile(pos.x, pos.y);
+    var L = [];
+    L.push(K.cm("/* 由页面参数实时生成；" + n + "×" + n + " 瓦片 */"));
+    L.push("lv_obj_t * tv = " + K.fn("lv_tileview_create") + "(lv_screen_active());");
+    L.push(K.fn("lv_obj_set_size") + "(tv, " + K.num(W) + ", " + K.num(H) + ");");
+    L.push(K.fn("lv_obj_center") + "(tv);");
+    L.push("");
+    for (row = 0; row < n; row++) {
+      for (col = 0; col < n; col++) {
+        L.push("lv_obj_t * t" + col + row + " = " + K.fn("lv_tileview_add_tile") +
+          "(tv, " + K.num(col) + ", " + K.num(row) + ", " + K.num(dirConst()) + ");");
+      }
+    }
+    L.push("");
+    L.push(K.cm("/* 当前活动瓦片：" + (a.col + 1) + " 列 " + (a.row + 1) + " 行 */"));
+    L.push(K.fn("lv_tileview_set_tile_by_index") + "(tv, " + K.num(a.col) + ", " + K.num(a.row) + ", " + K.num("LV_ANIM_ON") + ");");
+    L.push("lv_obj_t * active = " + K.fn("lv_tileview_get_tile_active") + "(tv);");
+    L.push(K.cm("/* 自动巡游演示由定时器切换 set_tile_by_index() 实现 */"));
+    K.code(L);
+  }
+
+  function syncCode() {
+    var a = activeTile(pos.x, pos.y);
+    var key = a.col + "," + a.row + "|" + state.count + "|" + state.dir;
+    if (key === lastKey) return;
+    lastKey = key;
+    renderCode();
+  }
+  canvas.addEventListener("pointerdown", function (e) {
+    if (e.button && e.button !== 0) return;
+    state.auto = false;
+    document.getElementById("auto").checked = false;
+    drag = { sx: e.clientX, sy: e.clientY, px: pos.x, py: pos.y };
+    anim = null;
+    canvas.setPointerCapture(e.pointerId);
+    canvas.style.cursor = "grabbing";
+  });
+
+  canvas.addEventListener("pointermove", function (e) {
+    if (!drag) { canvas.style.cursor = "grab"; return; }
+    var dx = e.clientX - drag.sx;
+    var dy = e.clientY - drag.sy;
+    var maxX = (state.count - 1) * W;
+    var maxY = (state.count - 1) * H;
+    if (state.dir === "hor") {
+      pos.x = rubber(drag.px - dx, 0, maxX);
+      pos.y = drag.py;
+    } else if (state.dir === "ver") {
+      pos.x = drag.px;
+      pos.y = rubber(drag.py - dy, 0, maxY);
+    } else {
+      pos.x = rubber(drag.px - dx, 0, maxX);
+      pos.y = rubber(drag.py - dy, 0, maxY);
+    }
+  });
+
+  function endDrag() {
+    if (!drag) return;
+    drag = null;
+    canvas.style.cursor = "grab";
+    snapNearest();
+  }
+  canvas.addEventListener("pointerup", endDrag);
+  canvas.addEventListener("pointercancel", endDrag);
+  canvas.style.cursor = "grab";
+
+  K.bindSeg("dir", function (v) {
+    state.dir = v;
+    if (v === "hor") {
+      pos.y = 0;
+      snapTo(activeTile(pos.x, 0).col, 0);
+    } else if (v === "ver") {
+      pos.x = 0;
+      snapTo(0, activeTile(0, pos.y).row);
+    }
+    if (state.auto) restartAuto();
+    lastKey = "";
+    renderCode();
+  });
+
+  K.bindRange("dur", function (v) { return v + " ms"; }, function (v) {
+    state.dur = v;
+    if (state.auto) restartAuto();
+    renderCode();
+  });
+
+  K.bindRange("count", function (v) { return v; }, function (v) {
+    state.count = v;
+    pos.x = K.clamp(pos.x, 0, (v - 1) * W);
+    pos.y = K.clamp(pos.y, 0, (v - 1) * H);
+    anim = null;
+    if (state.auto) restartAuto();
+    lastKey = "";
+    renderCode();
+  });
+
+  K.bindCheck("auto", function (on) {
+    state.auto = on;
+    if (on) restartAuto();
+    else snapNearest();
+  });
+
+  K.bindCheck("grid", function (on) { state.grid = on; });
+  function autoDuration() {
+    return path().length * stepDur();
+  }
+
+  document.getElementById("btn-png").addEventListener("click", function () {
+    K.exportPng(canvas, "tileview.png");
+  });
+
+  document.getElementById("btn-gif").addEventListener("click", function () {
+    var btn = this;
+    btn.disabled = true;
+    K.exportGif({
+      name: "tileview.gif", w: W, h: H, fps: 20, duration: autoDuration(),
+      frame: function (c, t) {
+        var p = tourPos(t);
+        drawScene(c, p.x, p.y);
+      },
+      onDone: function () { btn.disabled = false; },
+      onError: function () { btn.disabled = false; }
+    });
+  });
+
+  document.getElementById("btn-webm").addEventListener("click", function () {
+    var btn = this;
+    btn.disabled = true;
+    K.exportWebm({
+      canvas: canvas, name: "tileview.webm", duration: autoDuration(),
+      before: function () {
+        var prev = { auto: state.auto, t0: t0 };
+        state.auto = true;
+        restartAuto();
+        return prev;
+      },
+      after: function (prev) {
+        state.auto = prev.auto;
+        t0 = prev.t0;
+        document.getElementById("auto").checked = state.auto;
+      },
+      onDone: function () { btn.disabled = false; },
+      onError: function () { btn.disabled = false; }
+    });
+  });
+
+  restartAuto();
+  renderCode();
+  lastKey = activeTile(pos.x, pos.y).col + "," + activeTile(pos.x, pos.y).row + "|" + state.count + "|" + state.dir;
+})();
+</script>
+</body>
+</html>

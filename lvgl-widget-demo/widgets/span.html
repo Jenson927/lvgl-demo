@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LVGL Span 富文本复刻与导出</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='4' y='4' width='24' height='24' rx='5' fill='%232b7de9'/%3E%3Cpath d='M9 11h14M9 16h9M9 21h12' stroke='%23fff' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="../assets/panel.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <a class="back" href="../index.html">← 返回画廊</a>
+    <h1>LVGL Span 富文本本地复刻</h1>
+    <p>普通、彩色加粗、大字号、下划线、删除线与等宽片段混排，参数对齐 <code>lv_spangroup_set_overflow()</code> / <code>lv_spangroup_set_max_lines()</code>，SCROLL 模式会在 280×150 容器内循环滚动。</p>
+  </header>
+
+  <div class="stage">
+    <div class="stage-canvas-box"><canvas id="view"></canvas></div>
+  </div>
+
+  <section class="panel">
+    <h2>参数（对应 LVGL 接口）</h2>
+    <div class="grid">
+      <div class="field">
+        <label>溢出策略 set_overflow</label>
+        <div class="seg" id="overflow">
+          <button type="button" data-val="clip" class="active">CLIP</button>
+          <button type="button" data-val="dots">DOTS</button>
+          <button type="button" data-val="scroll">SCROLL</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>最大行数 max_lines <output id="o-lines">3</output></label>
+        <input type="range" id="lines" min="1" max="4" step="1" value="3">
+      </div>
+      <div class="field">
+        <label>对齐 set_align</label>
+        <div class="seg" id="align">
+          <button type="button" data-val="left" class="active">左</button>
+          <button type="button" data-val="center">中</button>
+          <button type="button" data-val="right">右</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>首行缩进 set_indent <output id="o-indent">0 px</output></label>
+        <input type="range" id="indent" min="0" max="60" step="2" value="0">
+      </div>
+      <div class="field">
+        <label>强调色 #1（彩色加粗）</label>
+        <input type="color" id="color1" value="#2b7de9">
+      </div>
+      <div class="field">
+        <label>大字号颜色 #2</label>
+        <input type="color" id="color2" value="#e6a23c">
+      </div>
+      <div class="field">
+        <label>大字号尺寸 <output id="o-big">26 px</output></label>
+        <input type="range" id="big" min="16" max="32" step="2" value="26">
+      </div>
+      <div class="field">
+        <label>滚动动画</label>
+        <div class="check"><input type="checkbox" id="scrollanim" checked><span>SCROLL 时循环滚动文本</span></div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button type="button" class="btn primary" id="btn-gif">导出 GIF</button>
+      <button type="button" class="btn" id="btn-webm">录制 WebM</button>
+      <button type="button" class="btn" id="btn-png">导出 PNG</button>
+    </div>
+    <div class="status" id="status"></div>
+  </section>
+
+  <pre class="code" id="code"></pre>
+
+  <footer>画布尺寸 320×240，文本容器 280×150（SCROLL 时忽略 max_lines）。GIF 编码由 gif.js（jsDelivr CDN）完成，需联网；WebM 使用浏览器原生 MediaRecorder，离线可用。</footer>
+</div>
+
+<script src="../assets/widget-kit.js"></script>
+<script>
+(function () {
+  "use strict";
+  var K = LVKit, W = 320, H = 240;
+  var BOX = { x: 20, y: 44, w: 280, h: 150, pad: 12 };
+  var SCROLL_SPEED = 24;
+
+  var state = {
+    overflow: "clip",
+    maxLines: 3,
+    align: "left",
+    indent: 0,
+    color1: "#2b7de9",
+    color2: "#e6a23c",
+    big: 26,
+    scrollAnim: true
+  };
+
+  var view = K.view(document.getElementById("view"));
+  view.resize(W, H);
+  var t0 = performance.now();
+
+  /* ---------- 文本片段 ---------- */
+  function buildSpans() {
+    return [
+      { text: "LVGL ", size: 14 },
+      { text: "富文本 Span", size: 14, weight: 600, color: state.color1 },
+      { text: " 支持多段样式混排：", size: 14 },
+      { text: "大字号", size: state.big, weight: 600, color: state.color2 },
+      { text: "、", size: 14 },
+      { text: "下划线", size: 14, underline: true },
+      { text: " 与 ", size: 14 },
+      { text: "删除线", size: 14, strike: true },
+      { text: "，还能嵌入 ", size: 14 },
+      { text: "monospace", size: 12, mono: true },
+      { text: " 等宽片段。这是一个用于演示 overflow 与 max_lines 的较长段落，文字会按容器宽度自动换行，并在 SCROLL 模式下循环滚动。", size: 14 },
+      { text: "继续补充一些文字，确保内容高度超过容器的可视区域，从而可以直观看到裁剪、省略号与循环滚动三种策略的差异。", size: 14 }
+    ];
+  }
+
+  function charStyle(tok) {
+    return {
+      size: tok.size,
+      weight: tok.weight || 400,
+      color: tok.color || "#1c2128",
+      mono: !!tok.mono,
+      underline: !!tok.underline,
+      strike: !!tok.strike
+    };
+  }
+
+  function charW(c, ch, st) {
+    return K.measure(c, ch, { size: st.size, weight: st.weight, mono: st.mono });
+  }
+
+  /* ---------- 排版 ---------- */
+  function layout(c, maxW, indent, limit) {
+    var spans = buildSpans();
+    var lines = [];
+    var cur = { chars: [], w: 0, maxSize: 14, split: false };
+
+    for (var s = 0; s < spans.length; s++) {
+      var st = charStyle(spans[s]);
+      var text = spans[s].text;
+      for (var i = 0; i < text.length; i++) {
+        var ch = text[i];
+        if (ch === "\n") {
+          lines.push(cur);
+          cur = { chars: [], w: 0, maxSize: 14 };
+          continue;
+        }
+        var cw = charW(c, ch, st);
+        var avail = maxW - (lines.length === 0 ? indent : 0);
+        if (cur.chars.length && cur.w + cw > avail) {
+          lines.push(cur);
+          cur = { chars: [], w: 0, maxSize: 14 };
+          avail = maxW;
+        }
+        cur.chars.push({ ch: ch, st: st, w: cw });
+        cur.w += cw;
+        if (st.size > cur.maxSize) cur.maxSize = st.size;
+      }
+    }
+    if (cur.chars.length || lines.length === 0) lines.push(cur);
+
+    var truncated = false;
+    if (limit > 0 && lines.length > limit) {
+      lines = lines.slice(0, limit);
+      truncated = true;
+    }
+    return { lines: lines, truncated: truncated };
+  }
+
+  function addEllipsis(c, lines, maxW, indent) {
+    var last = lines[lines.length - 1];
+    if (!last || !last.chars.length) return;
+    var st = last.chars[last.chars.length - 1].st;
+    var ew = K.measure(c, "…", { size: st.size, weight: st.weight, mono: st.mono });
+    var avail = maxW - (lines.length === 1 ? indent : 0);
+    while (last.chars.length > 1 && last.w + ew > avail) {
+      last.w -= last.chars.pop().w;
+    }
+    last.chars.push({ ch: "…", st: st, w: ew });
+    last.w += ew;
+  }
+
+  function lineHeight(line) {
+    return Math.max(20, line.maxSize * 1.5);
+  }
+
+  function drawLine(c, line, x0, iw, y, isFirst, indent, align) {
+    var avail = iw - (isFirst ? indent : 0);
+    var offset = 0;
+    if (align === "center") offset = Math.max(0, (avail - line.w) / 2);
+    else if (align === "right") offset = Math.max(0, avail - line.w);
+    var x = x0 + (isFirst ? indent : 0) + offset;
+    var baseline = y + line.maxSize * 1.02 + 2;
+
+    for (var i = 0; i < line.chars.length; i++) {
+      var ch = line.chars[i];
+      K.text(c, ch.ch, x, baseline, {
+        size: ch.st.size, weight: ch.st.weight, color: ch.st.color, mono: ch.st.mono,
+        baseline: "alphabetic"
+      });
+      if (ch.st.underline) {
+        c.beginPath();
+        c.moveTo(x, baseline + 2.5);
+        c.lineTo(x + ch.w, baseline + 2.5);
+        c.strokeStyle = ch.st.color;
+        c.lineWidth = 1;
+        c.stroke();
+      }
+      if (ch.st.strike) {
+        c.beginPath();
+        c.moveTo(x, baseline - ch.st.size * 0.3);
+        c.lineTo(x + ch.w, baseline - ch.st.size * 0.3);
+        c.strokeStyle = ch.st.color;
+        c.lineWidth = 1;
+        c.stroke();
+      }
+      x += ch.w;
+    }
+  }
+
+  /* ---------- 绘制 ---------- */
+  function drawScene(c, tMs, animate) {
+    c.clearRect(0, 0, W, H);
+    K.box(c, 12, 8, W - 24, H - 16, {
+      bg: "#ffffff", radius: 14, borderWidth: 1, border: "#e7eaee",
+      shadow: "rgba(28,33,40,0.07)", shadowBlur: 14, shadowY: 4
+    });
+
+    K.text(c, "lv_spangroup  280 × 150", 22, 30, { size: 12, weight: 600, color: K.theme.text });
+    var modeTxt = state.overflow === "clip" ? "CLIP" : (state.overflow === "dots" ? "DOTS" : "SCROLL");
+    K.text(c, modeTxt, W - 22, 30, { size: 10.5, mono: true, color: K.theme.textFaint, align: "right" });
+
+    K.box(c, BOX.x, BOX.y, BOX.w, BOX.h, {
+      bg: "#ffffff", radius: 10, borderWidth: 1, border: "#d6d9df"
+    });
+
+    var ix = BOX.x + BOX.pad, iy = BOX.y + BOX.pad;
+    var iw = BOX.w - BOX.pad * 2, ih = BOX.h - BOX.pad * 2;
+
+    var isScroll = state.overflow === "scroll";
+    var limit = isScroll ? 0 : state.maxLines;
+    var res = layout(c, iw, state.indent, limit);
+    var lines = res.lines;
+
+    if (state.overflow === "dots" && res.truncated) {
+      addEllipsis(c, lines, iw, state.indent);
+    }
+
+    var contentH = 0;
+    for (var i = 0; i < lines.length; i++) contentH += lineHeight(lines[i]);
+
+    var offset = 0;
+    if (isScroll && animate) {
+      var cycle = contentH + 12;
+      offset = (tMs * SCROLL_SPEED / 1000) % cycle;
+    }
+
+    c.save();
+    K.roundRectPath(c, ix, iy, iw, ih, 4);
+    c.clip();
+
+    var y = iy - offset;
+    for (var j = 0; j < lines.length; j++) {
+      var lh = lineHeight(lines[j]);
+      if (y + lh >= iy && y <= iy + ih) {
+        drawLine(c, lines[j], ix, iw, y, j === 0, state.indent, state.align);
+      }
+      y += lh;
+    }
+    c.restore();
+
+    /* 滚动渐变遮罩 */
+    if (isScroll) {
+      var g1 = c.createLinearGradient(0, iy, 0, iy + 14);
+      g1.addColorStop(0, "rgba(255,255,255,0.95)");
+      g1.addColorStop(1, "rgba(255,255,255,0)");
+      c.fillStyle = g1;
+      c.fillRect(ix, iy, iw, 14);
+      var g2 = c.createLinearGradient(0, iy + ih - 14, 0, iy + ih);
+      g2.addColorStop(0, "rgba(255,255,255,0)");
+      g2.addColorStop(1, "rgba(255,255,255,0.95)");
+      c.fillStyle = g2;
+      c.fillRect(ix, iy + ih - 14, iw, 14);
+    }
+
+    var info = state.overflow === "scroll"
+      ? "SCROLL · 循环滚动 · 忽略 max_lines"
+      : modeTxt + " · max_lines " + state.maxLines + " · 共 " + lines.length + " 行";
+    K.text(c, info, W / 2, 210, { size: 11, color: K.theme.textMuted, align: "center" });
+    K.text(c, "多 span 混排 · 自动换行 · 首行缩进 " + state.indent + " px", W / 2, 226, {
+      size: 10.5, color: K.theme.textFaint, align: "center"
+    });
+  }
+
+  /* ---------- 代码 ---------- */
+  function renderCode() {
+    var align = state.align === "left" ? "LV_TEXT_ALIGN_LEFT" : (state.align === "center" ? "LV_TEXT_ALIGN_CENTER" : "LV_TEXT_ALIGN_RIGHT");
+    var overflow = state.overflow === "dots" ? "LV_SPAN_OVERFLOW_ELLIPSIS" : "LV_SPAN_OVERFLOW_CLIP";
+    var spans = buildSpans();
+    var L = [];
+
+    L.push(K.cm("/* 由页面参数实时生成 */"));
+    L.push("lv_obj_t * spangroup = " + K.fn("lv_spangroup_create") + "(lv_screen_active());");
+    L.push(K.fn("lv_obj_set_size") + "(spangroup, " + K.num(BOX.w) + ", " + K.num(BOX.h) + ");");
+    L.push(K.fn("lv_obj_set_style_pad_all") + "(spangroup, " + K.num(BOX.pad) + ", 0);");
+    L.push(K.fn("lv_obj_set_style_text_font") + "(spangroup, &lv_font_source_han_sans_sc_16_cjk, 0);");
+    L.push("");
+    L.push(K.cm("/* 每段样式：颜色 / 字号 / 下划线 / 删除线 */"));
+    L.push("static lv_style_t st_bold, st_big, st_underline, st_strike, st_mono;");
+    L.push(K.fn("lv_style_init") + "(&st_bold);");
+    L.push(K.fn("lv_style_set_text_color") + "(&st_bold, " + K.fn("lv_color_hex") + "(" + K.num(K.hexCode(state.color1)) + "));");
+    L.push(K.fn("lv_style_init") + "(&st_big);");
+    L.push(K.fn("lv_style_set_text_color") + "(&st_big, " + K.fn("lv_color_hex") + "(" + K.num(K.hexCode(state.color2)) + "));");
+    L.push(K.fn("lv_style_set_text_font") + "(&st_big, &lv_font_montserrat_" + state.big + ");" + K.cm("  /* 中文字形请换成同字号字库 */"));
+    L.push(K.fn("lv_style_init") + "(&st_underline);");
+    L.push(K.fn("lv_style_set_text_decor") + "(&st_underline, " + K.num("LV_TEXT_DECOR_UNDERLINE") + ");");
+    L.push(K.fn("lv_style_init") + "(&st_strike);");
+    L.push(K.fn("lv_style_set_text_decor") + "(&st_strike, " + K.num("LV_TEXT_DECOR_STRIKETHROUGH") + ");");
+    L.push(K.fn("lv_style_init") + "(&st_mono);");
+    L.push(K.fn("lv_style_set_text_font") + "(&st_mono, &lv_font_unscii_8);");
+    L.push("");
+
+    for (var i = 0; i < spans.length; i++) {
+      var t = spans[i];
+      var v = "s" + (i + 1);
+      L.push("lv_span_t * " + v + " = " + K.fn("lv_spangroup_add_span") + "(spangroup);");
+      L.push(K.fn("lv_spangroup_set_span_text") + "(spangroup, " + v + ", " + JSON.stringify(t.text) + ");");
+      if (t.size === state.big && t.color) {
+        L.push(K.fn("lv_spangroup_set_span_style") + "(spangroup, " + v + ", &st_big);");
+      } else if (t.weight === 600 && t.color) {
+        L.push(K.fn("lv_spangroup_set_span_style") + "(spangroup, " + v + ", &st_bold);");
+      } else if (t.underline) {
+        L.push(K.fn("lv_spangroup_set_span_style") + "(spangroup, " + v + ", &st_underline);");
+      } else if (t.strike) {
+        L.push(K.fn("lv_spangroup_set_span_style") + "(spangroup, " + v + ", &st_strike);");
+      } else if (t.mono) {
+        L.push(K.fn("lv_spangroup_set_span_style") + "(spangroup, " + v + ", &st_mono);");
+      }
+    }
+
+    L.push("");
+    L.push(K.fn("lv_spangroup_set_overflow") + "(spangroup, " + K.num(overflow) + ");");
+    L.push(K.fn("lv_spangroup_set_max_lines") + "(spangroup, " +
+      K.num(state.overflow === "scroll" ? -1 : state.maxLines) + ");" +
+      (state.overflow === "scroll" ? K.cm("  /* SCROLL 展开全部行 */") : ""));
+    L.push(K.fn("lv_spangroup_set_align") + "(spangroup, " + K.num(align) + ");");
+    L.push(K.fn("lv_spangroup_set_indent") + "(spangroup, " + K.num(state.indent) + ");");
+    L.push(K.fn("lv_spangroup_set_mode") + "(spangroup, " + K.num("LV_SPAN_MODE_BREAK") + ");");
+    if (state.overflow === "scroll") {
+      L.push(K.cm("/* 演示中用定时器逐帧移动显示区域实现循环滚动 */"));
+    }
+    L.push(K.fn("lv_obj_center") + "(spangroup);");
+    K.code(L);
+  }
+
+  /* ---------- 控件 ---------- */
+  K.bindSeg("overflow", function (v) {
+    state.overflow = v;
+    renderCode();
+  });
+  K.bindRange("lines", function (v) { return v; }, function (v) {
+    state.maxLines = v;
+    renderCode();
+  });
+  K.bindSeg("align", function (v) {
+    state.align = v;
+    renderCode();
+  });
+  K.bindRange("indent", function (v) { return v + " px"; }, function (v) {
+    state.indent = v;
+    renderCode();
+  });
+  document.getElementById("color1").addEventListener("input", function (e) {
+    state.color1 = e.target.value;
+    renderCode();
+  });
+  document.getElementById("color2").addEventListener("input", function (e) {
+    state.color2 = e.target.value;
+    renderCode();
+  });
+  K.bindRange("big", function (v) { return v + " px"; }, function (v) {
+    state.big = v;
+    renderCode();
+  });
+  K.bindCheck("scrollanim", function (on) {
+    state.scrollAnim = on;
+  });
+
+  /* ---------- 导出 ---------- */
+  function exportDuration() {
+    return state.overflow === "scroll" ? 4000 : 1200;
+  }
+
+  document.getElementById("btn-png").addEventListener("click", function () {
+    K.exportPng(view.canvas, "span.png");
+  });
+
+  document.getElementById("btn-gif").addEventListener("click", function () {
+    var btn = this;
+    btn.disabled = true;
+    K.exportGif({
+      name: "span.gif", w: W, h: H, fps: 20, duration: exportDuration(),
+      frame: function (c, t) { drawScene(c, t, state.overflow === "scroll"); },
+      onDone: function () { btn.disabled = false; },
+      onError: function () { btn.disabled = false; }
+    });
+  });
+
+  document.getElementById("btn-webm").addEventListener("click", function () {
+    var btn = this;
+    btn.disabled = true;
+    K.exportWebm({
+      canvas: view.canvas, name: "span.webm", duration: exportDuration(),
+      before: function () {
+        var old = { anim: state.scrollAnim, overflow: state.overflow };
+        if (state.overflow === "scroll") state.scrollAnim = true;
+        return old;
+      },
+      after: function (old) {
+        state.scrollAnim = old.anim;
+        state.overflow = old.overflow;
+      },
+      onDone: function () { btn.disabled = false; },
+      onError: function () { btn.disabled = false; }
+    });
+  });
+
+  K.run(function (now) {
+    drawScene(view.ctx, now - t0, state.scrollAnim);
+  });
+
+  renderCode();
+})();
+</script>
+</body>
+</html>

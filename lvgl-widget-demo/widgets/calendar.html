@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LVGL Calendar 复刻与导出</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='4' y='6' width='24' height='21' rx='4' fill='none' stroke='%232b7de9' stroke-width='2'/%3E%3Cpath d='M4 12h24M10 4v5M22 4v5' stroke='%232b7de9' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="../assets/panel.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <a class="back" href="../index.html">← 返回画廊</a>
+    <h1>LVGL Calendar 本地复刻</h1>
+    <p>月视图日历：头部年月与左右箭头、星期行、日期网格，点击选中日期，今天用主色描边标记，参数对齐 <code>lv_calendar_set_month_shown()</code> / <code>lv_calendar_set_day_names()</code>。</p>
+  </header>
+
+  <div class="stage">
+    <div class="stage-canvas-box"><canvas id="view"></canvas></div>
+  </div>
+
+  <section class="panel">
+    <h2>参数（对应 LVGL 接口）</h2>
+    <div class="grid">
+      <div class="field">
+        <label>显示头部 header</label>
+        <div class="check"><input type="checkbox" id="header" checked><span>年月文字 + 左右箭头</span></div>
+      </div>
+      <div class="field">
+        <label>星期名称 day_names</label>
+        <div class="seg" id="lang">
+          <button type="button" data-val="zh" class="active">日一二三四五六</button>
+          <button type="button" data-val="en">Sun..Sat</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>高亮今天 highlight</label>
+        <div class="check"><input type="checkbox" id="today" checked><span>今天用主色描边</span></div>
+      </div>
+      <div class="field">
+        <label>显示箭头 header_arrow</label>
+        <div class="check"><input type="checkbox" id="arrows" checked><span>点击箭头切换月份</span></div>
+      </div>
+
+      <div class="field">
+        <label>年份 year <output id="o-year">2026 年</output></label>
+        <input type="range" id="year" min="2015" max="2040" step="1" value="2026">
+      </div>
+      <div class="field">
+        <label>月份 month <output id="o-month">10 月</output></label>
+        <input type="range" id="month" min="1" max="12" step="1" value="10">
+      </div>
+
+      <div class="field wide">
+        <label>选中日期 <output id="o-selected">2026-10-28 周三</output></label>
+        <div class="check"><span style="font-size:12px">点击画布中的日期即可选中；非本月日期留空。</span></div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button type="button" class="btn primary" id="btn-png">导出 PNG</button>
+    </div>
+    <div class="status" id="status"></div>
+  </section>
+
+  <pre class="code" id="code"></pre>
+
+  <footer>画布尺寸 320×280（日历需要更高）· 静态页仅提供 PNG 导出 · GIF 编码需联网，WebM 使用浏览器原生录制、离线可用。</footer>
+</div>
+
+<script src="../assets/widget-kit.js"></script>
+<script>(function () {
+  "use strict";
+  var K = LVKit, W = 320, H = 280;
+  var X = 16, CW = 288, HEAD_H = 36, WEEK_H = 24, CELL_H = 30;
+  var ROWS = 6;
+
+  var now = new Date();
+  var state = {
+    year: now.getFullYear(),
+    month: now.getMonth() + 1,
+    selDay: now.getDate(),
+    showHeader: true,
+    lang: "zh",
+    highlightToday: true,
+    arrows: true
+  };
+
+  var DAY_ZH = ["日", "一", "二", "三", "四", "五", "六"];
+  var DAY_EN = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  var WEEK_ZH = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+
+  var view = K.view(document.getElementById("view"));
+  view.resize(W, H);
+  view.canvas.style.cursor = "pointer";
+
+  document.getElementById("year").value = state.year;
+  document.getElementById("month").value = state.month;
+
+  function daysInMonth(y, m) { return new Date(y, m, 0).getDate(); }
+  function firstDow(y, m) { return new Date(y, m - 1, 1).getDay(); }
+  function pad2(n) { return n < 10 ? "0" + n : String(n); }
+
+  function selectedText() {
+    var d = new Date(state.year, state.month - 1, state.selDay);
+    var wd = state.lang === "zh" ? WEEK_ZH[d.getDay()] : DAY_EN[d.getDay()];
+    return state.year + "-" + pad2(state.month) + "-" + pad2(state.selDay) + " " + wd;
+  }
+
+  function isToday(y, m, d) {
+    return y === now.getFullYear() && m === now.getMonth() + 1 && d === now.getDate();
+  }
+
+  function layout() {
+    var headerH = state.showHeader ? HEAD_H : 0;
+    return {
+      cardY: 16,
+      headerH: headerH,
+      cardH: headerH + WEEK_H + ROWS * CELL_H,
+      gridX: X + 6,
+      gridW: CW - 12,
+      colW: (CW - 12) / 7
+    };
+  }
+
+  function drawHeader(c, y) {
+    K.text(c, state.year + " 年 " + state.month + " 月", X + CW / 2, y + 18, {
+      size: 15, weight: 600, align: "center", color: K.theme.text
+    });
+    if (!state.arrows) return;
+    var ly = y + 18;
+    K.box(c, X + 8, ly - 12, 24, 24, { bg: "#f4f6f9", radius: 6 });
+    K.box(c, X + CW - 32, ly - 12, 24, 24, { bg: "#f4f6f9", radius: 6 });
+    K.icon(c, "left", X + 14, ly - 7, 13, K.theme.primary);
+    K.icon(c, "right", X + CW - 26, ly - 7, 13, K.theme.primary);
+  }
+
+  function drawWeek(c, y) {
+    var lt = layout();
+    var names = state.lang === "zh" ? DAY_ZH : DAY_EN;
+    for (var i = 0; i < 7; i++) {
+      K.text(c, names[i], lt.gridX + lt.colW * i + lt.colW / 2, y + WEEK_H / 2, {
+        size: state.lang === "zh" ? 12 : 10.5,
+        color: K.theme.textFaint, align: "center"
+      });
+    }
+    c.strokeStyle = "#eef0f3";
+    c.lineWidth = 1;
+    c.beginPath();
+    c.moveTo(X + 6, Math.round(y + WEEK_H) + 0.5);
+    c.lineTo(X + CW - 6, Math.round(y + WEEK_H) + 0.5);
+    c.stroke();
+  }
+
+  function drawGrid(c, y) {
+    var lt = layout();
+    var days = daysInMonth(state.year, state.month);
+    var start = firstDow(state.year, state.month);
+
+    for (var i = 0; i < ROWS * 7; i++) {
+      var day = i - start + 1;
+      if (day < 1 || day > days) continue;
+      var row = Math.floor(i / 7), col = i % 7;
+      var cx = lt.gridX + col * lt.colW + lt.colW / 2;
+      var cy = y + row * CELL_H + CELL_H / 2;
+      var sel = day === state.selDay;
+      var today = state.highlightToday && isToday(state.year, state.month, day);
+
+      if (sel) {
+        c.save();
+        c.shadowColor = K.alpha(K.theme.primary, 0.25);
+        c.shadowBlur = 8;
+        c.shadowOffsetY = 2;
+        K.box(c, cx - 17, cy - 13, 34, 26, { bg: K.theme.primary, radius: 6 });
+        c.restore();
+        K.text(c, day, cx, cy + 1, { size: 13, weight: 600, color: "#ffffff", align: "center" });
+      } else {
+        if (today) {
+          K.box(c, cx - 17, cy - 13, 34, 26, {
+            radius: 6, borderWidth: 1.5, border: K.theme.primary
+          });
+          K.text(c, day, cx, cy + 1, { size: 13, color: K.theme.primary, align: "center" });
+        } else {
+          K.text(c, day, cx, cy + 1, { size: 13, color: K.theme.text, align: "center" });
+        }
+      }
+    }
+  }
+
+  function draw(c) {
+    c.clearRect(0, 0, W, H);
+    var lt = layout();
+
+    K.box(c, X, lt.cardY, CW, lt.cardH, {
+      bg: "#ffffff", radius: 10, borderWidth: 1, border: "#d6d9df",
+      shadow: K.alpha("#1c2128", 0.08), shadowBlur: 12, shadowY: 4
+    });
+
+    var y = lt.cardY;
+    if (state.showHeader) {
+      drawHeader(c, y);
+      y += HEAD_H;
+    }
+    drawWeek(c, y);
+    y += WEEK_H;
+    drawGrid(c, y);
+
+    K.text(c, "已选：" + selectedText(), W / 2, lt.cardY + lt.cardH + 18, {
+      size: 12, color: K.theme.textMuted, align: "center"
+    });
+  }
+
+  K.run(function () { draw(view.ctx); });
+
+  function syncMonthInputs() {
+    document.getElementById("year").value = state.year;
+    document.getElementById("month").value = state.month;
+    document.getElementById("o-year").textContent = state.year + " 年";
+    document.getElementById("o-month").textContent = state.month + " 月";
+  }
+
+  function syncSelected() {
+    document.getElementById("o-selected").textContent = selectedText();
+  }
+
+  function afterChange() {
+    renderCode();
+    syncSelected();
+    syncMonthInputs();
+  }
+
+  function goMonth(delta) {
+    var m = state.month + delta;
+    var y = state.year;
+    if (m < 1) { m = 12; y--; }
+    if (m > 12) { m = 1; y++; }
+    if (y < 2015) { y = 2015; m = 1; }
+    if (y > 2040) { y = 2040; m = 12; }
+    state.year = y;
+    state.month = m;
+    state.selDay = Math.min(state.selDay, daysInMonth(y, m));
+    afterChange();
+    K.status("显示 " + y + " 年 " + m + " 月");
+  }
+
+  /* ---------- 画布交互 ---------- */
+  view.canvas.addEventListener("pointerdown", function (e) {
+    var rect = view.canvas.getBoundingClientRect();
+    var px = (e.clientX - rect.left) * (W / rect.width);
+    var py = (e.clientY - rect.top) * (H / rect.height);
+    var lt = layout();
+
+    if (state.showHeader && state.arrows && py >= lt.cardY && py <= lt.cardY + HEAD_H) {
+      if (px >= X + 4 && px <= X + 36) { goMonth(-1); return; }
+      if (px >= X + CW - 36 && px <= X + CW - 4) { goMonth(1); return; }
+    }
+
+    var gridY = lt.cardY + lt.headerH + WEEK_H;
+    if (px < lt.gridX || px > lt.gridX + lt.gridW || py < gridY) return;
+    var col = Math.floor((px - lt.gridX) / lt.colW);
+    var row = Math.floor((py - gridY) / CELL_H);
+    if (col < 0 || col > 6 || row < 0 || row >= ROWS) return;
+    var day = row * 7 + col - firstDow(state.year, state.month) + 1;
+    var days = daysInMonth(state.year, state.month);
+    if (day < 1 || day > days) return;
+    state.selDay = day;
+    afterChange();
+    K.status("已选择 " + selectedText());
+  });
+
+  /* ---------- 参数 ---------- */
+  K.bindRange("year", function (v) { return v + " 年"; }, function (v) {
+    state.year = v;
+    state.selDay = Math.min(state.selDay, daysInMonth(state.year, state.month));
+    afterChange();
+  });
+  K.bindRange("month", function (v) { return v + " 月"; }, function (v) {
+    state.month = v;
+    state.selDay = Math.min(state.selDay, daysInMonth(state.year, state.month));
+    afterChange();
+  });
+  K.bindCheck("header", function (on) { state.showHeader = on; renderCode(); });
+  K.bindCheck("today", function (on) { state.highlightToday = on; renderCode(); });
+  K.bindCheck("arrows", function (on) { state.arrows = on; renderCode(); });
+  K.bindSeg("lang", function (v) {
+    state.lang = v;
+    afterChange();
+  });
+
+  /* ---------- C 代码 ---------- */
+  function renderCode() {
+    var names = state.lang === "zh" ? DAY_ZH : DAY_EN;
+    var qnames = names.map(function (n) { return '"' + n + '"'; }).join(", ");
+    var L = [];
+    L.push(K.cm("/* 由页面参数实时生成 */"));
+    L.push("lv_obj_t * cal = " + K.fn("lv_calendar_create") + "(lv_screen_active());");
+    L.push(K.fn("lv_obj_set_size") + "(cal, " + K.num(CW) + ", " + K.num((state.showHeader ? HEAD_H : 0) + WEEK_H + ROWS * CELL_H) + ");");
+    L.push(K.fn("lv_calendar_set_today_date") + "(cal, " + K.num(now.getFullYear()) + ", " + K.num(now.getMonth() + 1) + ", " + K.num(now.getDate()) + ");");
+    L.push(K.fn("lv_calendar_set_month_shown") + "(cal, " + K.num(state.year) + ", " + K.num(state.month) + ");");
+    L.push("static const char * day_names[7] = {" + qnames + "};");
+    L.push(K.fn("lv_calendar_set_day_names") + "(cal, day_names);");
+    L.push("static lv_calendar_date_t highlighted[1] = {{" + state.year + ", " + state.month + ", " + state.selDay + "}};");
+    L.push(K.fn("lv_calendar_set_highlighted_dates") + "(cal, highlighted, " + K.num(1) + ");");
+
+    if (state.showHeader && state.arrows) {
+      L.push(K.fn("lv_calendar_add_header_arrow") + "(cal);");
+    } else if (state.showHeader) {
+      L.push(K.cm("/* 无箭头头部：可在日历上方自建 lv_label 显示年月 */"));
+    } else {
+      L.push(K.cm("/* 不添加 header：仅显示星期行与日期网格 */"));
+    }
+
+    L.push(K.cm("/* 可选：农历显示 */"));
+    L.push(K.cm("/* lv_calendar_set_chinese_mode(cal, true); */"));
+    L.push(K.fn("lv_obj_center") + "(cal);");
+
+    K.code(L);
+  }
+
+  document.getElementById("btn-png").addEventListener("click", function () {
+    K.exportPng(view.canvas, "calendar.png");
+  });
+
+  syncMonthInputs();
+  syncSelected();
+  renderCode();
+  K.status("点击日期选择 · 点击箭头切换月份");
+})();</script>
+</body>
+</html>

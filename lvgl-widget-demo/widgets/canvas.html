@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LVGL Canvas 复刻与导出</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='4' y='6' width='24' height='20' rx='2' fill='%23fff' stroke='%23d6d9df'/%3E%3Cpath d='M8 20l5-6 4 4 7-8' fill='none' stroke='%232b7de9' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="../assets/panel.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <a class="back" href="../index.html">← 返回画廊</a>
+    <h1>LVGL Canvas 本地复刻</h1>
+    <p>280×180 白色画布，支持画笔 / 橡皮自由绘制、撤销与预置图形；内容保存在离屏缓冲中，主画布每帧重绘。下方标注 <code>LV_COLOR_FORMAT_ARGB8888</code> 的缓冲区大小。</p>
+  </header>
+
+  <div class="stage">
+    <div class="stage-canvas-box"><canvas id="view"></canvas></div>
+  </div>
+
+  <section class="panel">
+    <h2>参数（对应 LVGL 接口）</h2>
+    <div class="grid">
+      <div class="field">
+        <label>工具</label>
+        <div class="seg" id="tool">
+          <button type="button" data-val="pen" class="active">画笔</button>
+          <button type="button" data-val="eraser">橡皮</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>画笔颜色 set_px</label>
+        <input type="color" id="color" value="#2b7de9">
+      </div>
+      <div class="field wide">
+        <label>笔宽 line_width <output id="o-width">3 px</output></label>
+        <input type="range" id="width" min="1" max="16" step="1" value="3">
+      </div>
+      <div class="field wide">
+        <label>操作说明</label>
+        <div class="check"><span style="font-size:12px">在白色画布内按住拖动即可绘制；撤销最多保留 30 步快照。</span></div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button type="button" class="btn" id="btn-undo">撤销</button>
+      <button type="button" class="btn" id="btn-clear">清空</button>
+      <button type="button" class="btn" id="btn-rect">矩形</button>
+      <button type="button" class="btn" id="btn-circle">圆</button>
+      <button type="button" class="btn" id="btn-diag">对角线</button>
+      <button type="button" class="btn" id="btn-text">文字</button>
+      <button type="button" class="btn primary" id="btn-png">导出 PNG</button>
+    </div>
+    <div class="status" id="status"></div>
+  </section>
+
+  <pre class="code" id="code"></pre>
+
+  <footer>画布尺寸 320×240（绘图缓冲 280×180）。本页为静态演示，提供 PNG 导出（GIF 需联网，WebM 离线可用，本页未启用）；缓冲信息：280×180 · ARGB8888 · 201600 B。</footer>
+</div>
+
+<script src="../assets/widget-kit.js"></script>
+<script>
+(function () {
+  "use strict";
+  var K = LVKit, W = 320, H = 240;
+  var CW = 280, CH = 180;
+  var BX = (W - CW) / 2, BY = 18;
+  var MAX_HISTORY = 30;
+
+  var state = {
+    eraser: false,
+    color: "#2b7de9",
+    width: 3
+  };
+
+  var view = K.view(document.getElementById("view"));
+  view.resize(W, H);
+  var canvas = view.canvas;
+  canvas.style.cursor = "crosshair";
+
+  var buf = document.createElement("canvas");
+  buf.width = CW;
+  buf.height = CH;
+  var bctx = buf.getContext("2d");
+  var history = [];
+
+  function fillWhite() {
+    bctx.save();
+    bctx.setTransform(1, 0, 0, 1, 0, 0);
+    bctx.fillStyle = "#ffffff";
+    bctx.fillRect(0, 0, CW, CH);
+    bctx.restore();
+  }
+  fillWhite();
+
+  function pushHistory() {
+    if (history.length >= MAX_HISTORY) history.shift();
+    history.push(bctx.getImageData(0, 0, CW, CH));
+  }
+
+  function drawScene(c) {
+    c.clearRect(0, 0, W, H);
+
+    c.save();
+    c.shadowColor = "rgba(28,33,40,0.16)";
+    c.shadowBlur = 12;
+    c.shadowOffsetY = 4;
+    c.fillStyle = "#ffffff";
+    K.roundRectPath(c, BX, BY, CW, CH, 3);
+    c.fill();
+    c.restore();
+
+    c.drawImage(buf, BX, BY);
+
+    c.strokeStyle = "#d6d9df";
+    c.lineWidth = 1;
+    c.strokeRect(BX + 0.5, BY + 0.5, CW - 1, CH - 1);
+
+    K.text(c, "280×180 · LV_COLOR_FORMAT_ARGB8888", W / 2, 214, {
+      size: 11, mono: true, color: K.theme.textMuted, align: "center"
+    });
+    K.text(c, "280*180*4 = 201600 B", W / 2, 229, {
+      size: 11, mono: true, color: K.theme.textFaint, align: "center"
+    });
+  }
+
+  K.run(function () {
+    drawScene(view.ctx);
+  });
+
+  function toBuffer(e) {
+    var r = canvas.getBoundingClientRect();
+    return {
+      x: (e.clientX - r.left) * (W / r.width) - BX,
+      y: (e.clientY - r.top) * (H / r.height) - BY
+    };
+  }
+
+  function inside(p) {
+    return p.x >= 0 && p.x <= CW && p.y >= 0 && p.y <= CH;
+  }
+
+  function clampToBuffer(p) {
+    return { x: K.clamp(p.x, 0, CW), y: K.clamp(p.y, 0, CH) };
+  }
+
+  function strokeStyle() {
+    bctx.strokeStyle = state.eraser ? "#ffffff" : state.color;
+    bctx.fillStyle = bctx.strokeStyle;
+    bctx.lineWidth = state.width;
+    bctx.lineCap = "round";
+    bctx.lineJoin = "round";
+  }
+
+  function drawDot(p) {
+    strokeStyle();
+    bctx.beginPath();
+    bctx.arc(p.x, p.y, state.width / 2, 0, Math.PI * 2);
+    bctx.fill();
+  }
+
+  var drawing = false;
+  var last = { x: 0, y: 0 };
+
+  canvas.addEventListener("pointerdown", function (e) {
+    var p = toBuffer(e);
+    if (!inside(p)) return;
+    p = clampToBuffer(p);
+    pushHistory();
+    drawing = true;
+    last = p;
+    drawDot(p);
+    canvas.setPointerCapture(e.pointerId);
+  });
+
+  canvas.addEventListener("pointermove", function (e) {
+    if (!drawing) return;
+    var p = clampToBuffer(toBuffer(e));
+    strokeStyle();
+    bctx.beginPath();
+    bctx.moveTo(last.x, last.y);
+    bctx.lineTo(p.x, p.y);
+    bctx.stroke();
+    last = p;
+  });
+
+  function endStroke() {
+    drawing = false;
+  }
+  canvas.addEventListener("pointerup", endStroke);
+  canvas.addEventListener("pointercancel", endStroke);
+
+  function rectPreset() {
+    pushHistory();
+    strokeStyle();
+    K.roundRectPath(bctx, 32, 30, 96, 62, 6);
+    bctx.stroke();
+    K.status("已绘制矩形（撤销可回退）", true);
+  }
+
+  function circlePreset() {
+    pushHistory();
+    strokeStyle();
+    bctx.beginPath();
+    bctx.arc(148, 92, 42, 0, Math.PI * 2);
+    bctx.stroke();
+    K.status("已绘制圆形（撤销可回退）", true);
+  }
+
+  function diagonalPreset() {
+    pushHistory();
+    strokeStyle();
+    bctx.beginPath();
+    bctx.moveTo(24, 24);
+    bctx.lineTo(256, 156);
+    bctx.stroke();
+    K.status("已绘制对角线（撤销可回退）", true);
+  }
+
+  function textPreset() {
+    pushHistory();
+    K.text(bctx, "LVGL 画布", 140, 92, {
+      size: 24, weight: 600, color: state.eraser ? "#ffffff" : state.color, align: "center"
+    });
+    K.status("已写入文字（撤销可回退）", true);
+  }
+
+  function undo() {
+    if (!history.length) {
+      K.status("没有可撤销的操作");
+      return;
+    }
+    bctx.putImageData(history.pop(), 0, 0);
+    K.status("已撤销，剩余 " + history.length + " 步快照", true);
+  }
+
+  function clearAll() {
+    pushHistory();
+    fillWhite();
+    K.status("画布已清空（撤销可恢复）", true);
+  }
+
+  function renderCode() {
+    var L = [];
+    L.push(K.cm("/* 由页面参数实时生成 · 280 × 180 ARGB8888 */"));
+    L.push("#define CANVAS_W " + K.num(CW));
+    L.push("#define CANVAS_H " + K.num(CH));
+    L.push("static uint8_t canvas_buf[CANVAS_W * CANVAS_H * 4];   " + K.cm("/* 201600 B */"));
+    L.push("");
+    L.push("lv_obj_t * canvas = " + K.fn("lv_canvas_create") + "(lv_screen_active());");
+    L.push(K.fn("lv_canvas_set_buffer") + "(canvas, canvas_buf, CANVAS_W, CANVAS_H, " + K.num("LV_COLOR_FORMAT_ARGB8888") + ");");
+    L.push(K.fn("lv_canvas_fill_bg") + "(canvas, " + K.fn("lv_color_hex") + "(" + K.num("0xffffff") + "), LV_OPA_COVER);");
+    L.push(K.fn("lv_obj_center") + "(canvas);");
+    L.push("");
+    if (state.eraser) {
+      L.push(K.cm("/* 橡皮：用白色像素覆盖轨迹 */"));
+      L.push(K.fn("lv_canvas_set_px") + "(canvas, x, y, " + K.fn("lv_color_hex") + "(" + K.num("0xffffff") + "), LV_OPA_COVER);");
+    } else {
+      L.push(K.cm("/* 画笔：沿轨迹逐点写入，宽度 " + state.width + " px */"));
+      L.push(K.fn("lv_canvas_set_px") + "(canvas, x, y, " + K.fn("lv_color_hex") + "(" + K.num(K.hexCode(state.color)) + "), LV_OPA_COVER);");
+    }
+    L.push("");
+    L.push(K.cm("/* 预置图形：init_layer → lv_draw_rect / lv_draw_line → finish_layer */"));
+    L.push("lv_layer_t layer;");
+    L.push(K.fn("lv_canvas_init_layer") + "(canvas, &layer);");
+    L.push("");
+    L.push("lv_draw_rect_dsc_t rect_dsc;");
+    L.push(K.fn("lv_draw_rect_dsc_init") + "(&rect_dsc);");
+    L.push("rect_dsc.bg_opa = LV_OPA_TRANSP;");
+    L.push("rect_dsc.border_color = " + K.fn("lv_color_hex") + "(" + K.num(K.hexCode(state.color)) + ");");
+    L.push("rect_dsc.border_width = " + K.num(state.width) + ";");
+    L.push("rect_dsc.radius = 40;   " + K.cm("/* 半径取宽高一半即为圆 */"));
+    L.push("lv_area_t coords = {30, 30, 150, 120};");
+    L.push(K.fn("lv_draw_rect") + "(&layer, &rect_dsc, &coords);");
+    L.push("");
+    L.push("lv_draw_line_dsc_t line_dsc;");
+    L.push(K.fn("lv_draw_line_dsc_init") + "(&line_dsc);");
+    L.push("line_dsc.color = " + K.fn("lv_color_hex") + "(" + K.num(K.hexCode(state.color)) + ");");
+    L.push("line_dsc.width = " + K.num(state.width) + ";");
+    L.push("line_dsc.round_start = 1;");
+    L.push("line_dsc.round_end = 1;");
+    L.push("line_dsc.p1.x = 24;  line_dsc.p1.y = 24;");
+    L.push("line_dsc.p2.x = 256; line_dsc.p2.y = 156;");
+    L.push(K.fn("lv_draw_line") + "(&layer, &line_dsc);");
+    L.push("");
+    L.push(K.cm("/* 文字可用 lv_draw_label(&layer, &label_dsc, &coords); */"));
+    L.push(K.fn("lv_canvas_finish_layer") + "(canvas, &layer);");
+    K.code(L);
+  }
+
+  K.bindSeg("tool", function (v) {
+    state.eraser = v === "eraser";
+    renderCode();
+  });
+  document.getElementById("color").addEventListener("input", function (e) {
+    state.color = e.target.value;
+    renderCode();
+  });
+  K.bindRange("width", function (v) { return v + " px"; }, function (v) {
+    state.width = v;
+    renderCode();
+  });
+
+  document.getElementById("btn-undo").addEventListener("click", undo);
+  document.getElementById("btn-clear").addEventListener("click", clearAll);
+  document.getElementById("btn-rect").addEventListener("click", rectPreset);
+  document.getElementById("btn-circle").addEventListener("click", circlePreset);
+  document.getElementById("btn-diag").addEventListener("click", diagonalPreset);
+  document.getElementById("btn-text").addEventListener("click", textPreset);
+  document.getElementById("btn-png").addEventListener("click", function () {
+    K.exportPng(view.canvas, "canvas.png");
+  });
+
+  renderCode();
+})();
+</script>

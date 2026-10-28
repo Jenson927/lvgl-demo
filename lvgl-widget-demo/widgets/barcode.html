@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LVGL Barcode 复刻与导出</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='4' y='4' width='24' height='24' rx='4' fill='%23fff' stroke='%232b7de9' stroke-width='2'/%3E%3Cpath d='M9 8v16M12 8v16M16 8v16M18 8v16M22 8v16M24 8v16' stroke='%231c2128' stroke-width='1.6'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="../assets/panel.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <a class="back" href="../index.html">← 返回画廊</a>
+    <h1>LVGL Barcode 本地复刻</h1>
+    <p>由大写字母 / 数字生成 Code128 风格条纹，带起始、终止保护条与左右静区；模块宽度、条高、方向、平铺与配色实时可调，参数对齐 <code>lv_barcode_set_scale()</code> / <code>lv_barcode_update()</code>。</p>
+  </header>
+
+  <div class="stage">
+    <div class="stage-canvas-box"><canvas id="view"></canvas></div>
+  </div>
+
+  <section class="panel">
+    <h2>参数（对应 LVGL 接口）</h2>
+    <div class="grid">
+      <div class="field wide">
+        <label>数据 update <output id="o-len">4 字符</output></label>
+        <input type="text" id="text" value="LVGL" maxlength="10">
+      </div>
+      <div class="field">
+        <label>模块宽度 set_scale <output id="o-scale">2 px</output></label>
+        <input type="range" id="scale" min="1" max="4" step="1" value="2">
+      </div>
+      <div class="field">
+        <label>条高 <output id="o-height">90 px</output></label>
+        <input type="range" id="height" min="50" max="140" step="5" value="90">
+      </div>
+      <div class="field">
+        <label>深色 set_dark_color</label>
+        <input type="color" id="dark" value="#1c2128">
+      </div>
+      <div class="field">
+        <label>浅色 set_light_color</label>
+        <input type="color" id="light" value="#ffffff">
+      </div>
+      <div class="field">
+        <label>方向 set_direction</label>
+        <div class="seg" id="dir">
+          <button type="button" data-val="h" class="active">水平</button>
+          <button type="button" data-val="v">垂直</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>平铺 set_tiled</label>
+        <div class="seg" id="tiled">
+          <button type="button" data-val="off" class="active">关闭</button>
+          <button type="button" data-val="on">开启</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>显示文本</label>
+        <div class="check"><input type="checkbox" id="showtext" checked><span>在条纹下方叠加数据文本</span></div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button type="button" class="btn primary" id="btn-png">导出 PNG</button>
+    </div>
+    <div class="status" id="status"></div>
+  </section>
+
+  <pre class="code" id="code"></pre>
+
+  <footer>画布尺寸 320×240。条纹为演示用示意编码，并非真实 Code128 校验，无法被扫描器识别。PNG 导出离线可用；GIF 需联网（gif.js CDN），WebM 基于浏览器原生 MediaRecorder，离线可用。</footer>
+</div>
+
+<script src="../assets/widget-kit.js"></script>
+<script>
+(function () {
+  "use strict";
+  var K = LVKit, W = 320, H = 240;
+  var START = [2, 1, 1, 2, 1, 4];
+  var STOP = [2, 3, 3, 1, 1, 1, 2];
+  var QUIET = 10;
+
+  var state = {
+    text: "LVGL",
+    scale: 2,
+    height: 90,
+    dark: "#1c2128",
+    light: "#ffffff",
+    dir: "h",
+    tiled: false,
+    showText: true
+  };
+
+  var view = K.view(document.getElementById("view"));
+  view.resize(W, H);
+
+  /* ---------- 确定性条纹 ---------- */
+  function charPattern(code, index) {
+    var h = (code * 7919 + index * 104729 + 12345) % 2147483647;
+    var parts = [1, 1, 1, 1, 1, 1];
+    var extra = 5, guard = 0;
+    while (extra > 0 && guard < 200) {
+      h = (h * 48271) % 2147483647;
+      var idx = h % 6;
+      if (parts[idx] < 4) {
+        parts[idx]++;
+        extra--;
+      }
+      guard++;
+    }
+    return parts;
+  }
+
+  function buildPattern() {
+    var widths = START.slice();
+    var i;
+    for (i = 0; i < state.text.length; i++) {
+      widths = widths.concat(charPattern(state.text.charCodeAt(i), i));
+    }
+    var sum = 0;
+    for (i = 0; i < state.text.length; i++) sum += (i + 1) * state.text.charCodeAt(i);
+    widths = widths.concat(charPattern(sum + 17, state.text.length));
+    widths = widths.concat(STOP);
+
+    var bars = [], x = QUIET;
+    for (i = 0; i < widths.length; i++) {
+      if (i % 2 === 0) bars.push({ x: x, w: widths[i] });
+      x += widths[i];
+    }
+    return { bars: bars, modules: x + QUIET };
+  }
+
+  /* ---------- 绘制 ---------- */
+  function draw(c) {
+    c.clearRect(0, 0, W, H);
+    K.box(c, 12, 8, W - 24, H - 16, {
+      bg: "#ffffff", radius: 14, borderWidth: 1, border: "#e7eaee",
+      shadow: "rgba(28,33,40,0.07)", shadowBlur: 14, shadowY: 4
+    });
+
+    K.text(c, "lv_barcode", 26, 24, { size: 13, weight: 600, color: K.theme.text });
+    K.text(c, "Code128 示意", W - 26, 24, { size: 11, color: K.theme.textFaint, align: "right" });
+
+    var pattern = buildPattern();
+    var unit = state.scale;
+    var patternW = pattern.modules * unit;
+
+    var vx = 20, vy = 40, vw = W - 40, vh = 146;
+    var horiz = state.dir === "h";
+    var span = horiz ? vw : vh;
+
+    K.box(c, vx, vy, vw, vh, { bg: state.light, radius: 10, borderWidth: 1, border: "#e3e8ef" });
+
+    c.save();
+    K.roundRectPath(c, vx, vy, vw, vh, 10);
+    c.clip();
+
+    var barH = state.height;
+
+    function paintBars(base, barHeight) {
+      for (var i = 0; i < pattern.bars.length; i++) {
+        var b = pattern.bars[i];
+        c.fillStyle = state.dark;
+        c.fillRect(base + b.x * unit, -barHeight / 2, b.w * unit, barHeight);
+      }
+    }
+
+    c.save();
+    c.translate(vx + vw / 2, vy + vh / 2);
+    if (!horiz) c.rotate(-Math.PI / 2);
+
+    var startX = state.tiled ? -span / 2 : (span - patternW) / 2;
+    var reps = state.tiled ? Math.ceil(span / patternW) + 2 : 1;
+    for (var r = 0; r < reps; r++) {
+      var base = startX + r * patternW;
+      if (base > span / 2 && !state.tiled) break;
+      paintBars(base, barH);
+      if (!state.tiled) break;
+    }
+    c.restore();
+    c.restore();
+
+    if (state.showText) {
+      K.text(c, state.text || "—", W / 2, 198, {
+        size: 14, weight: 600, mono: true, color: state.dark, align: "center"
+      });
+    }
+
+    var clipped = !state.tiled && patternW > span;
+    var info = "模块 " + unit + " px · " + pattern.modules + " 模块 · 图示" + (horiz ? "宽 " : "高 ") + Math.round(patternW) + " px";
+    if (clipped) info += "（超出画布，已裁剪）";
+    K.text(c, info, W / 2, 214, { size: 10.5, color: K.theme.textMuted, align: "center" });
+    K.text(c, "条纹为演示用示意编码，非真实 Code128 校验", W / 2, 227, {
+      size: 9.5, color: K.theme.textFaint, align: "center"
+    });
+  }
+
+  /* ---------- 代码 ---------- */
+  function renderCode() {
+    var L = [];
+    L.push(K.cm("/* Code128 风格示意：起始 / 终止保护条 + 左右 10 模块静区 */"));
+    L.push("lv_obj_t * bc = " + K.fn("lv_barcode_create") + "(lv_screen_active());");
+    L.push(K.fn("lv_barcode_set_scale") + "(bc, " + K.num(state.scale) + ");");
+    L.push(K.fn("lv_barcode_set_dark_color") + "(bc, " + K.fn("lv_color_hex") + "(" + K.num(K.hexCode(state.dark)) + "));");
+    L.push(K.fn("lv_barcode_set_light_color") + "(bc, " + K.fn("lv_color_hex") + "(" + K.num(K.hexCode(state.light)) + "));");
+    L.push(K.fn("lv_barcode_set_direction") + "(bc, " + K.num(state.dir === "h" ? "LV_DIR_HOR" : "LV_DIR_VER") + ");");
+    L.push(K.fn("lv_barcode_set_tiled") + "(bc, " + K.num(state.tiled ? "true" : "false") + ");");
+    L.push(K.fn("lv_barcode_update") + "(bc, " + JSON.stringify(state.text || "") + ");");
+    L.push(K.fn("lv_obj_center") + "(bc);");
+    if (state.showText) L.push(K.cm("/* 文本标签由 lv_label 叠加在条码下方 */"));
+    K.code(L);
+  }
+
+  /* ---------- 控件 ---------- */
+  var textEl = document.getElementById("text");
+  function syncLen() {
+    document.getElementById("o-len").textContent = state.text.length + " 字符";
+  }
+  textEl.addEventListener("input", function () {
+    var v = textEl.value.toUpperCase().replace(/[^A-Z0-9]/g, "");
+    if (v !== textEl.value) textEl.value = v;
+    state.text = v;
+    syncLen();
+    renderCode();
+  });
+
+  K.bindRange("scale", function (v) { return v + " px"; }, function (v) {
+    state.scale = v;
+    renderCode();
+  });
+  K.bindRange("height", function (v) { return v + " px"; }, function (v) {
+    state.height = v;
+    renderCode();
+  });
+  document.getElementById("dark").addEventListener("input", function (e) {
+    state.dark = e.target.value;
+    renderCode();
+  });
+  document.getElementById("light").addEventListener("input", function (e) {
+    state.light = e.target.value;
+    renderCode();
+  });
+  K.bindSeg("dir", function (v) {
+    state.dir = v;
+    renderCode();
+  });
+  K.bindSeg("tiled", function (v) {
+    state.tiled = v === "on";
+    renderCode();
+  });
+  K.bindCheck("showtext", function (on) {
+    state.showText = on;
+    renderCode();
+  });
+
+  document.getElementById("btn-png").addEventListener("click", function () {
+    K.exportPng(view.canvas, "barcode.png");
+  });
+
+  K.run(function () { draw(view.ctx); });
+
+  syncLen();
+  renderCode();
+})();
+</script>
+</body>
+</html>

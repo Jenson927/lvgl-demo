@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LVGL Anim Image 复刻与导出</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='4' y='4' width='24' height='24' rx='6' fill='%232b7de9'/%3E%3Ccircle cx='16' cy='17' r='4' fill='%23fff'/%3E%3Cpath d='M11 9h10' stroke='%23fff' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="../assets/panel.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <a class="back" href="../index.html">← 返回画廊</a>
+    <h1>LVGL Anim Image 本地复刻</h1>
+    <p>程序化生成的 96×96 帧序列（弹跳小球 + 投影 + 旋转星形），参数对齐 <code>lv_animimg_set_src()</code> / <code>lv_animimg_set_duration()</code> / <code>lv_animimg_set_repeat_count()</code>，点击画面可暂停或继续。</p>
+  </header>
+
+  <div class="stage">
+    <div class="stage-canvas-box"><canvas id="view"></canvas></div>
+  </div>
+
+  <section class="panel">
+    <h2>参数（对应 LVGL 接口）</h2>
+    <div class="grid">
+      <div class="field">
+        <label>帧数 序列长度 <output id="o-frames">8 帧</output></label>
+        <input type="range" id="frames" min="4" max="10" step="1" value="8">
+      </div>
+      <div class="field">
+        <label>一轮时长 set_duration <output id="o-duration">1600 ms</output></label>
+        <input type="range" id="duration" min="500" max="5000" step="100" value="1600">
+      </div>
+      <div class="field">
+        <label>重复次数 repeat_count <output id="o-repeat">无限</output></label>
+        <input type="range" id="repeat" min="-1" max="5" step="1" value="-1">
+      </div>
+      <div class="field">
+        <label>自动播放</label>
+        <div class="check"><input type="checkbox" id="auto" checked><span>载入后立即开始播放</span></div>
+      </div>
+      <div class="field wide">
+        <label>帧缩略图条</label>
+        <div class="check"><span style="font-size:12px">画布下方实时高亮当前显示的帧</span></div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button type="button" class="btn" id="btn-play">暂停</button>
+      <button type="button" class="btn primary" id="btn-gif">导出 GIF</button>
+      <button type="button" class="btn" id="btn-webm">录制 WebM</button>
+      <button type="button" class="btn" id="btn-png">导出 PNG</button>
+    </div>
+    <div class="status" id="status"></div>
+  </section>
+
+  <pre class="code" id="code"></pre>
+
+  <footer>画布尺寸 320×240。GIF 编码由 gif.js（jsDelivr CDN）完成，需联网；WebM 使用浏览器原生 MediaRecorder，离线可用。</footer>
+</div>
+
+<script src="../assets/widget-kit.js"></script>
+<script>
+(function () {
+  "use strict";
+  var K = LVKit, W = 320, H = 240;
+
+  var state = {
+    frames: 8,
+    duration: 1600,
+    repeat: -1,
+    playing: true
+  };
+
+  var view = K.view(document.getElementById("view"));
+  view.resize(W, H);
+  var clock = { acc: 0, last: 0 };
+
+  /* ---------- 帧画面（可独立绘制任意帧） ---------- */
+  function starPath(c, cx, cy, outer, inner, rot) {
+    var i, a, r;
+    c.beginPath();
+    for (i = 0; i < 10; i++) {
+      a = rot + i * Math.PI / 5 - Math.PI / 2;
+      r = (i % 2 === 0) ? outer : inner;
+      if (i === 0) c.moveTo(cx + Math.cos(a) * r, cy + Math.sin(a) * r);
+      else c.lineTo(cx + Math.cos(a) * r, cy + Math.sin(a) * r);
+    }
+    c.closePath();
+  }
+
+  function frameArt(c, x, y, size, idx, count) {
+    var u = size / 96;
+    var p = count > 1 ? idx / (count - 1) : 0;
+    var lift = Math.abs(Math.sin(Math.PI * p));
+
+    c.save();
+
+    var g = c.createRadialGradient(x + size / 2, y + size * 0.22, size * 0.04, x + size / 2, y + size / 2, size * 0.78);
+    g.addColorStop(0, "#ffffff");
+    g.addColorStop(1, "#eef3fb");
+    K.roundRectPath(c, x, y, size, size, 10 * u);
+    c.fillStyle = g;
+    c.fill();
+
+    c.strokeStyle = "#dbe2ec";
+    c.lineWidth = Math.max(0.6, 1 * u);
+    c.beginPath();
+    c.moveTo(x + 12 * u, y + size - 13 * u);
+    c.lineTo(x + size - 12 * u, y + size - 13 * u);
+    c.stroke();
+
+    var br = 11 * u;
+    var lowest = y + size - 14 * u - br;
+    var highest = y + 20 * u + br;
+    var cy = K.lerp(lowest, highest, lift);
+    var cx = x + size / 2;
+
+    var shrink = 1 - 0.38 * lift;
+    c.save();
+    c.globalAlpha = 0.22 * (1 - 0.45 * lift);
+    c.fillStyle = "#5b6470";
+    K.ellipse(c, cx, y + size - 13 * u, 17 * u * shrink, 3.4 * u * shrink);
+    c.fill();
+    c.restore();
+
+    var bg = c.createRadialGradient(cx - br * 0.35, cy - br * 0.4, br * 0.12, cx, cy, br);
+    bg.addColorStop(0, "#7fb4f5");
+    bg.addColorStop(0.45, "#2b7de9");
+    bg.addColorStop(1, "#1f6fd0");
+    c.beginPath();
+    c.arc(cx, cy, br, 0, Math.PI * 2);
+    c.fillStyle = bg;
+    c.fill();
+
+    c.save();
+    c.globalAlpha = 0.6;
+    c.fillStyle = "#ffffff";
+    c.beginPath();
+    c.arc(cx - br * 0.32, cy - br * 0.36, br * 0.25, 0, Math.PI * 2);
+    c.fill();
+    c.restore();
+
+    var rot = idx / count * Math.PI * 2;
+    starPath(c, x + size * 0.78, y + size * 0.24, 13 * u, 5.6 * u, rot);
+    c.fillStyle = "#e6a23c";
+    c.fill();
+    c.lineWidth = Math.max(0.5, 0.9 * u);
+    c.strokeStyle = "#ffffff";
+    c.stroke();
+
+    if (size >= 60) {
+      c.fillStyle = "rgba(28,33,40,0.32)";
+      c.font = "600 " + (9 * u) + "px " + K.MONO;
+      c.textAlign = "left";
+      c.textBaseline = "alphabetic";
+      c.fillText((idx + 1) + "/" + count, x + 7 * u, y + size - 6 * u);
+    }
+
+    c.restore();
+  }
+
+  /* ---------- 时间 ---------- */
+  function totalMs() {
+    return state.repeat >= 0 ? state.duration * (state.repeat + 1) : Infinity;
+  }
+  function ended(t) { return t >= totalMs(); }
+
+  function frameIndexAt(t) {
+    if (t >= totalMs()) return state.frames - 1;
+    var p = (t % state.duration) / state.duration;
+    return Math.min(state.frames - 1, Math.floor(p * state.frames));
+  }
+
+  function progressAt(t) {
+    if (t >= totalMs()) return 1;
+    return (t % state.duration) / state.duration;
+  }
+
+  /* ---------- 绘制 ---------- */
+  function draw(c, tMs) {
+    var t = Math.min(tMs, totalMs());
+    var idx = frameIndexAt(t);
+
+    c.clearRect(0, 0, W, H);
+    K.box(c, 12, 8, W - 24, H - 16, {
+      bg: "#ffffff", radius: 14, borderWidth: 1, border: "#e7eaee",
+      shadow: "rgba(28,33,40,0.07)", shadowBlur: 14, shadowY: 4
+    });
+
+    K.text(c, "lv_animimg", 26, 25, { size: 13, weight: 600, color: K.theme.text });
+    K.text(c, "96 × 96 · " + state.frames + " 帧", W - 26, 25, { size: 11.5, color: K.theme.textFaint, align: "right" });
+
+    K.box(c, 111, 35, 98, 98, {
+      bg: "#ffffff", radius: 12, borderWidth: 1, border: "#dfe4ea",
+      shadow: "rgba(28,33,40,0.10)", shadowBlur: 10, shadowY: 3
+    });
+    frameArt(c, 112, 36, 96, idx, state.frames);
+
+    if (!state.playing) {
+      c.save();
+      c.globalAlpha = 0.92;
+      c.fillStyle = "#ffffff";
+      c.beginPath();
+      c.arc(196, 120, 13, 0, Math.PI * 2);
+      c.fill();
+      c.strokeStyle = "#d6d9df";
+      c.lineWidth = 1;
+      c.stroke();
+      K.icon(c, "play", 190, 114, 12, K.theme.primary);
+      c.restore();
+    }
+
+    var repeatTxt = state.repeat < 0 ? "重复 ∞" : "重复 " + (state.repeat + 1) + " 次";
+    K.text(c, "一轮 " + state.duration + " ms · " + repeatTxt, W / 2, 146, {
+      size: 11.5, color: K.theme.textMuted, align: "center"
+    });
+
+    var n = state.frames, ts = 22, gap = 3;
+    var tw = n * ts + (n - 1) * gap;
+    var tx = (W - tw) / 2, ty = 157;
+    for (var i = 0; i < n; i++) {
+      var x = tx + i * (ts + gap);
+      frameArt(c, x, ty, ts, i, n);
+      c.save();
+      c.lineWidth = i === idx ? 2 : 1;
+      c.strokeStyle = i === idx ? K.theme.primary : "#dfe4ea";
+      K.roundRectPath(c, x - 0.5, ty - 0.5, ts + 1, ts + 1, 4);
+      c.stroke();
+      if (i === idx) {
+        c.globalAlpha = 0.16;
+        c.fillStyle = K.theme.primary;
+        K.roundRectPath(c, x, ty, ts, ts, 4);
+        c.fill();
+      }
+      c.restore();
+    }
+
+    K.text(c, "当前帧 " + (idx + 1) + " / " + n, W / 2, 194, {
+      size: 12, color: K.theme.text, align: "center"
+    });
+
+    var p = progressAt(t);
+    K.box(c, 90, 203, 140, 5, { bg: "#e3e6ea", radius: 3 });
+    if (p > 0.002) K.box(c, 90, 203, Math.max(5, 140 * p), 5, { bg: K.theme.primary, radius: 3 });
+
+    K.text(c, state.playing ? "点击画面暂停" : "已暂停 · 点击画面继续", W / 2, 222, {
+      size: 11, color: K.theme.textFaint, align: "center"
+    });
+  }
+
+  /* ---------- 主循环 ---------- */
+  K.run(function (now) {
+    if (!clock.last) clock.last = now;
+    var dt = now - clock.last;
+    clock.last = now;
+    if (state.playing) {
+      clock.acc += dt;
+      if (ended(clock.acc)) clock.acc = totalMs();
+    }
+    draw(view.ctx, clock.acc);
+  });
+
+  /* ---------- 代码 ---------- */
+  function renderCode() {
+    var n = state.frames;
+    var names = [];
+    for (var i = 0; i < n; i++) names.push("&frame_" + i);
+    var L = [];
+    L.push(K.cm("/* 由页面参数实时生成；帧图像由页面程序化绘制 */"));
+    L.push(K.cm("/* " + n + " 张 96×96 图像描述符（RGB565 / ARGB8888） */"));
+    L.push("static const void * frame_dsc[" + n + "] = {" + names.join(", ") + "};");
+    L.push("");
+    L.push("lv_obj_t * animimg = " + K.fn("lv_animimg_create") + "(lv_screen_active());");
+    L.push(K.fn("lv_obj_set_size") + "(animimg, " + K.num(96) + ", " + K.num(96) + ");");
+    L.push(K.fn("lv_animimg_set_src") + "(animimg, frame_dsc, " + K.num(n) + ");");
+    L.push(K.fn("lv_animimg_set_duration") + "(animimg, " + K.num(state.duration) + ");");
+    L.push(K.fn("lv_animimg_set_repeat_count") + "(animimg, " +
+      (state.repeat < 0 ? K.num("LV_ANIM_REPEAT_INFINITE") : K.num(state.repeat)) + ");");
+    L.push(K.fn("lv_animimg_start") + "(animimg);");
+    L.push(K.fn("lv_obj_center") + "(animimg);");
+    K.code(L);
+  }
+
+  /* ---------- 控件 ---------- */
+  function syncPlayBtn() {
+    document.getElementById("btn-play").textContent = state.playing ? "暂停" : "播放";
+  }
+
+  function setPlaying(on) {
+    state.playing = on;
+    if (on && ended(clock.acc)) clock.acc = 0;
+    document.getElementById("auto").checked = on;
+    syncPlayBtn();
+  }
+
+  K.bindRange("frames", function (v) { return v + " 帧"; }, function (v) {
+    state.frames = v;
+    renderCode();
+  });
+  K.bindRange("duration", function (v) { return v + " ms"; }, function (v) {
+    state.duration = v;
+    renderCode();
+  });
+
+  (function () {
+    var el = document.getElementById("repeat");
+    var out = document.getElementById("o-repeat");
+    function apply() {
+      state.repeat = Number(el.value);
+      out.textContent = state.repeat < 0 ? "无限" : (state.repeat + 1) + " 次";
+      renderCode();
+    }
+    el.addEventListener("input", apply);
+    apply();
+  })();
+
+  K.bindCheck("auto", function (on) {
+    state.playing = on;
+    if (on && ended(clock.acc)) clock.acc = 0;
+    syncPlayBtn();
+  });
+
+  document.getElementById("btn-play").addEventListener("click", function () {
+    setPlaying(!state.playing);
+  });
+
+  view.canvas.addEventListener("pointerdown", function () {
+    setPlaying(!state.playing);
+  });
+
+  /* ---------- 导出 ---------- */
+  document.getElementById("btn-png").addEventListener("click", function () {
+    K.exportPng(view.canvas, "animimg.png");
+  });
+
+  function exportDuration() {
+    return Math.max(800, Math.min(totalMs(), 6000));
+  }
+
+  document.getElementById("btn-gif").addEventListener("click", function () {
+    var btn = this;
+    btn.disabled = true;
+    K.exportGif({
+      name: "animimg.gif", w: W, h: H, fps: 20, duration: exportDuration(),
+      frame: function (c, t) { draw(c, t); },
+      onDone: function () { btn.disabled = false; },
+      onError: function () { btn.disabled = false; }
+    });
+  });
+
+  document.getElementById("btn-webm").addEventListener("click", function () {
+    var btn = this;
+    btn.disabled = true;
+    K.exportWebm({
+      canvas: view.canvas, name: "animimg.webm", duration: Math.min(exportDuration(), 4000),
+      before: function () {
+        var old = state.playing;
+        state.playing = true;
+        clock.acc = 0;
+        clock.last = 0;
+        syncPlayBtn();
+        return old;
+      },
+      after: function (old) {
+        state.playing = old;
+        syncPlayBtn();
+      },
+      onDone: function () { btn.disabled = false; },
+      onError: function () { btn.disabled = false; }
+    });
+  });
+
+  renderCode();
+  syncPlayBtn();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LVGL Menu 复刻与导出</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='3' y='5' width='9' height='22' rx='3' fill='%232b7de9'/%3E%3Cg fill='%23b8bfc9'%3E%3Crect x='14' y='8' width='15' height='3' rx='1'/%3E%3Crect x='14' y='15' width='15' height='3' rx='1'/%3E%3Crect x='14' y='22' width='10' height='3' rx='1'/%3E%3C/g%3E%3C/svg%3E">
+<link rel="stylesheet" href="../assets/panel.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <a class="back" href="../index.html">← 返回画廊</a>
+    <h1>LVGL Menu 本地复刻</h1>
+    <p>侧栏导航 + 多级页面：首页 / 设置 / 关于三个根页面，条目可进入子页并由返回按钮回退，参数对齐 <code>lv_menu_set_sidebar_page()</code> / <code>lv_menu_set_load_page_event()</code>。</p>
+  </header>
+
+  <div class="stage">
+    <div class="stage-canvas-box"><canvas id="view"></canvas></div>
+  </div>
+
+  <section class="panel">
+    <h2>参数（对应 LVGL 接口）</h2>
+    <div class="grid">
+      <div class="field wide">
+        <label>标题栏位置 set_mode_header</label>
+        <div class="seg" id="header">
+          <button type="button" data-val="top" class="active">顶部</button>
+          <button type="button" data-val="side">侧栏</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>侧栏宽度 <output id="o-width">110 px</output></label>
+        <input type="range" id="width" min="90" max="160" step="1" value="110">
+      </div>
+      <div class="field">
+        <label>显示根返回按钮</label>
+        <div class="check"><input type="checkbox" id="rootback" checked><span>set_mode_root_back_button</span></div>
+      </div>
+      <div class="field">
+        <label>显示边栏标题</label>
+        <div class="check"><input type="checkbox" id="sidetitle" checked><span>侧栏顶部显示 “菜单”</span></div>
+      </div>
+      <div class="field">
+        <label>自动演示导航</label>
+        <div class="check"><input type="checkbox" id="auto"><span>首页 → 设置 → 子页 → 关于 循环</span></div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button type="button" class="btn primary" id="btn-png">导出 PNG</button>
+    </div>
+    <div class="status" id="status"></div>
+  </section>
+
+  <pre class="code" id="code"></pre>
+
+  <footer>画布尺寸 320×240。静态页面，导出 PNG 即可留档；点击左侧菜单项切换主页面，点击条目进入子页，返回按钮可逐级回退。</footer>
+</div>
+
+<script src="../assets/widget-kit.js"></script>
+<script>
+(function () {
+  "use strict";
+  var K = LVKit, W = 320, H = 240;
+
+  var PAGES = {
+    home: {
+      root: "home", title: "首页", icon: "home",
+      items: [
+        { icon: "wifi", label: "网络设置", page: "sub-wifi", sym: "LV_SYMBOL_WIFI" },
+        { icon: "bell", label: "通知管理", page: "sub-notify", sym: "LV_SYMBOL_BELL" },
+        { icon: "folder", label: "我的文件", page: "sub-files", sym: "LV_SYMBOL_DIRECTORY" }
+      ]
+    },
+    settings: {
+      root: "settings", title: "设置", icon: "gear",
+      items: [
+        { icon: "wifi", label: "无线网络", page: "sub-wifi", sym: "LV_SYMBOL_WIFI" },
+        { icon: "gear", label: "显示与亮度", page: "sub-display", sym: "LV_SYMBOL_SETTINGS" }
+      ]
+    },
+    about: {
+      root: "about", title: "关于", icon: "user",
+      items: [
+        { icon: "file", label: "版本信息", page: "sub-version", sym: "LV_SYMBOL_FILE" },
+        { icon: "user", label: "开发者", page: "sub-dev", sym: "LV_SYMBOL_USER" }
+      ]
+    },
+    "sub-wifi": {
+      root: "settings", title: "无线网络", parent: "settings",
+      info: [["已连接", "Office-5G"], ["信号强度", "-42 dBm"], ["安全类型", "WPA2"]]
+    },
+    "sub-display": {
+      root: "settings", title: "显示与亮度", parent: "settings",
+      info: [["亮度", "70 %"], ["护眼模式", "关闭"], ["自动休眠", "2 分钟"]]
+    },
+    "sub-notify": {
+      root: "home", title: "通知管理", parent: "home",
+      info: [["允许通知", "是"], ["横幅显示", "开启"], ["免打扰", "22:00"]]
+    },
+    "sub-files": {
+      root: "home", title: "我的文件", parent: "home",
+      info: [["已用空间", "12.4 GB"], ["剩余空间", "51.8 GB"], ["文件数量", "328"]]
+    },
+    "sub-version": {
+      root: "about", title: "版本信息", parent: "about",
+      info: [["LVGL", "v10.0"], ["构建日期", "2026-10"], ["内核", "demo"]]
+    },
+    "sub-dev": {
+      root: "about", title: "开发者", parent: "about",
+      info: [["团队", "LVGL Team"], ["许可", "MIT"], ["主页", "lvgl.io"]]
+    }
+  };
+
+  var SIDE_ITEMS = [
+    { root: "home", label: "首页", icon: "home", sym: "LV_SYMBOL_HOME" },
+    { root: "settings", label: "设置", icon: "gear", sym: "LV_SYMBOL_SETTINGS" },
+    { root: "about", label: "关于", icon: "user", sym: "LV_SYMBOL_USER" }
+  ];
+
+  var PAGE_VAR = {
+    home: "home_page", settings: "settings_page", about: "about_page",
+    "sub-wifi": "sub_wifi_page", "sub-display": "sub_display_page",
+    "sub-notify": "sub_notify_page", "sub-files": "sub_files_page",
+    "sub-version": "sub_version_page", "sub-dev": "sub_dev_page"
+  };
+
+  var state = {
+    header: "top",
+    width: 110,
+    rootBack: true,
+    sideTitle: true,
+    auto: false,
+    page: "home",
+    sel: "home"
+  };
+
+  var view = K.view(document.getElementById("view"));
+  view.resize(W, H);
+
+  var autoStart = 0;
+  var sideRects = [];
+  var rowRects = [];
+  var backRect = null;
+
+  var AUTO_SEQ = ["home", "settings", "sub-wifi", "settings", "about", "home"];
+  var AUTO_STEP = 1500;
+
+  function canBack() {
+    var p = PAGES[state.page];
+    return !!p.parent || state.rootBack;
+  }
+
+  function backTarget() {
+    var p = PAGES[state.page];
+    if (p.parent) return p.parent;
+    if (state.page !== "home") return "home";
+    return null;
+  }
+
+  /* ---------- 绘制 ---------- */
+  function drawScene(c) {
+    var sw = state.width;
+    var mx = sw + 1;
+    var mw = W - mx;
+    var pg = PAGES[state.page];
+
+    sideRects = [];
+    rowRects = [];
+    backRect = null;
+
+    c.clearRect(0, 0, W, H);
+    c.fillStyle = "#ffffff";
+    c.fillRect(0, 0, W, H);
+
+    /* 侧栏 */
+    c.fillStyle = "#f5f7fa";
+    c.fillRect(0, 0, sw, H);
+    c.fillStyle = "#e2e6eb";
+    c.fillRect(sw, 0, 1, H);
+
+    var sideHeaderH = state.sideTitle ? 36 : 0;
+    if (state.sideTitle) {
+      K.text(c, "菜单", 16, 18, { size: 14, weight: 600, color: K.theme.text });
+      c.fillStyle = "#e8ebf0";
+      c.fillRect(12, 35, sw - 24, 1);
+    }
+
+    var listTop = sideHeaderH + 8;
+
+    /* 侧栏模式下，页面标题与返回按钮放在侧栏 */
+    if (state.header === "side") {
+      var ty = sideHeaderH + 26;
+      if (canBack()) {
+        backRect = { x: 10, y: ty - 12, w: 24, h: 24 };
+        K.box(c, 10, ty - 12, 24, 24, { bg: "#e8eefb", radius: 12 });
+        K.icon(c, "left", 16, ty - 6, 12, K.theme.primary);
+      }
+      K.text(c, pg.title, canBack() ? 42 : 16, ty, { size: 12.5, weight: 600, color: K.theme.text });
+      listTop = ty + 28;
+    }
+
+    for (var i = 0; i < SIDE_ITEMS.length; i++) {
+      var item = SIDE_ITEMS[i];
+      var iy = listTop + i * 44;
+      var active = (pg.root === item.root);
+      if (active) K.box(c, 8, iy + 4, sw - 16, 36, { bg: "#e4edfc", radius: 8 });
+      K.icon(c, item.icon, 16, iy + 13, 18, active ? K.theme.primary : K.theme.textMuted);
+      K.text(c, item.label, 42, iy + 22, {
+        size: 13, weight: active ? 600 : 400,
+        color: active ? K.theme.primary : K.theme.text
+      });
+      sideRects.push({ x: 0, y: iy, w: sw, h: 44, root: item.root });
+    }
+
+    /* 主区域 */
+    var contentTop;
+    if (state.header === "top") {
+      c.fillStyle = "#ffffff";
+      c.fillRect(mx, 0, mw, 34);
+      c.fillStyle = "#e8ebf0";
+      c.fillRect(mx, 33, mw, 1);
+      if (canBack()) {
+        backRect = { x: mx + 8, y: 5, w: 24, h: 24 };
+        K.box(c, mx + 8, 5, 24, 24, { bg: "#e8eefb", radius: 12 });
+        K.icon(c, "left", mx + 14, 11, 12, K.theme.primary);
+      }
+      K.text(c, pg.title, mx + (canBack() ? 40 : 16), 17, { size: 14, weight: 600, color: K.theme.text });
+      contentTop = 46;
+    } else {
+      contentTop = 14;
+    }
+
+    if (pg.items) {
+      for (var k = 0; k < pg.items.length; k++) {
+        var it = pg.items[k];
+        var ry = contentTop + k * 44;
+        if (k > 0) {
+          c.fillStyle = "#eef0f3";
+          c.fillRect(mx + 14, ry, mw - 28, 1);
+        }
+        K.icon(c, it.icon, mx + 16, ry + 13, 18, K.theme.textMuted);
+        K.text(c, it.label, mx + 44, ry + 22, { size: 14, color: K.theme.text });
+        K.text(c, "›", mx + mw - 18, ry + 21, { size: 17, color: "#b8bfc9", align: "center" });
+        rowRects.push({ x: mx, y: ry, w: mw, h: 44, page: it.page });
+      }
+    } else {
+      var cx = mx + 12, cy = contentTop, cw = mw - 24;
+      K.box(c, cx, cy, cw, 118, { bg: "#f7f8fa", radius: 10, borderWidth: 1, border: "#e6e9ee" });
+      for (var j = 0; j < pg.info.length; j++) {
+        var ly = cy + 22 + j * 32;
+        K.text(c, pg.info[j][0], cx + 14, ly, { size: 12, color: K.theme.textMuted });
+        K.text(c, pg.info[j][1], cx + cw - 14, ly, {
+          size: 12.5, weight: 600, color: K.theme.text, align: "right"
+        });
+        if (j < pg.info.length - 1) {
+          c.fillStyle = "#e6e9ee";
+          c.fillRect(cx + 14, ly + 16, cw - 28, 1);
+        }
+      }
+    }
+
+    K.text(c, "点击侧栏或条目切换页面", mx + mw / 2, H - 12, {
+      size: 11, color: K.theme.textFaint, align: "center"
+    });
+  }
+
+  K.run(function (now) {
+    if (state.auto) {
+      var idx = Math.floor((now - autoStart) / AUTO_STEP) % AUTO_SEQ.length;
+      if (state.page !== AUTO_SEQ[idx]) {
+        state.page = AUTO_SEQ[idx];
+        renderCode();
+      }
+    }
+    drawScene(view.ctx);
+  });
+
+  /* ---------- 交互 ---------- */
+  function posOf(e) {
+    var r = view.canvas.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  }
+
+  function inside(p, r) {
+    return p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h;
+  }
+
+  function stopAuto() {
+    if (state.auto) {
+      state.auto = false;
+      document.getElementById("auto").checked = false;
+    }
+  }
+
+  view.canvas.addEventListener("pointerdown", function (e) {
+    var p = posOf(e);
+    var i;
+    if (backRect && inside(p, backRect)) {
+      var target = backTarget();
+      if (target) {
+        state.page = target;
+        stopAuto();
+        renderCode();
+      }
+      return;
+    }
+    for (i = 0; i < sideRects.length; i++) {
+      if (inside(p, sideRects[i])) {
+        state.page = sideRects[i].root;
+        stopAuto();
+        renderCode();
+        return;
+      }
+    }
+    for (i = 0; i < rowRects.length; i++) {
+      if (inside(p, rowRects[i])) {
+        state.page = rowRects[i].page;
+        stopAuto();
+        renderCode();
+        return;
+      }
+    }
+  });
+
+  /* ---------- 参数 ---------- */
+  K.bindSeg("header", function (v) {
+    state.header = v;
+    renderCode();
+  });
+
+  K.bindRange("width", function (v) { return v + " px"; }, function (v) {
+    state.width = v;
+    renderCode();
+  });
+
+  K.bindCheck("rootback", function (on) { state.rootBack = on; renderCode(); });
+  K.bindCheck("sidetitle", function (on) { state.sideTitle = on; renderCode(); });
+  K.bindCheck("auto", function (on) {
+    state.auto = on;
+    autoStart = performance.now();
+    if (on) {
+      state.page = "home";
+      renderCode();
+    }
+  });
+
+  /* ---------- C 代码 ---------- */
+  function renderCode() {
+    var pg = PAGES[state.page];
+    var L = [];
+    var keys = ["home", "settings", "about", "sub-wifi", "sub-display", "sub-notify",
+      "sub-files", "sub-version", "sub-dev"];
+
+    L.push(K.cm("/* 由页面参数实时生成 */"));
+    L.push("lv_obj_t * menu = " + K.fn("lv_menu_create") + "(lv_screen_active());");
+    L.push(K.fn("lv_obj_set_size") + "(menu, " + K.num(W) + ", " + K.num(H) + ");");
+    L.push(K.fn("lv_obj_center") + "(menu);");
+    L.push("");
+
+    for (var k = 0; k < keys.length; k++) {
+      var key = keys[k];
+      L.push("lv_obj_t * " + PAGE_VAR[key] + " = " + K.fn("lv_menu_page_create") +
+        "(menu, " + JSON.stringify(PAGES[key].title) + ");");
+    }
+    L.push("");
+
+    L.push("lv_obj_t * sidebar = " + K.fn("lv_menu_page_create") + "(menu, NULL);");
+    L.push(K.fn("lv_obj_set_width") + "(sidebar, " + K.num(state.width) + ");");
+    L.push(K.fn("lv_menu_set_sidebar_page") + "(menu, sidebar);");
+    L.push("lv_obj_t * sc = " + K.fn("lv_menu_cont_create") + "(sidebar);");
+    for (var s = 0; s < SIDE_ITEMS.length; s++) {
+      var it = SIDE_ITEMS[s];
+      L.push("lv_obj_t * b_" + it.root + " = " + K.fn("lv_button_create") + "(sc);");
+      L.push("lv_obj_t * l_" + it.root + " = " + K.fn("lv_label_create") + "(b_" + it.root + ");");
+      L.push(K.fn("lv_label_set_text") + "(l_" + it.root + ", \"" + it.sym + " " + it.label + "\");");
+      L.push(K.fn("lv_menu_set_load_page_event") + "(menu, b_" + it.root + ", " + PAGE_VAR[it.root] + ");");
+    }
+    L.push("");
+
+    L.push("lv_obj_t * cont = " + K.fn("lv_menu_cont_create") + "(" + PAGE_VAR[state.page] + ");");
+    if (pg.items) {
+      for (var i = 0; i < pg.items.length; i++) {
+        var row = pg.items[i];
+        L.push("lv_obj_t * item_" + i + " = " + K.fn("lv_button_create") + "(cont);");
+        L.push("lv_obj_t * lbl_" + i + " = " + K.fn("lv_label_create") + "(item_" + i + ");");
+        L.push(K.fn("lv_label_set_text") + "(lbl_" + i + ", \"" + row.sym + " " + row.label + "\");");
+        L.push(K.fn("lv_menu_set_load_page_event") + "(menu, item_" + i + ", " + PAGE_VAR[row.page] + ");");
+      }
+    } else {
+      for (var j = 0; j < pg.info.length; j++) {
+        L.push("lv_obj_t * lb_" + j + " = " + K.fn("lv_label_create") + "(cont);");
+        L.push(K.fn("lv_label_set_text") + "(lb_" + j + ", " + JSON.stringify(pg.info[j][0] + "：" + pg.info[j][1]) + ");");
+      }
+    }
+    L.push("");
+
+    L.push(K.fn("lv_menu_set_page") + "(menu, " + PAGE_VAR[state.page] + ");");
+    L.push(K.fn("lv_menu_set_page_title") + "(" + PAGE_VAR[state.page] + ", " + JSON.stringify(pg.title) + ");");
+    L.push(K.fn("lv_menu_set_mode_header") + "(menu, " + K.num("LV_MENU_HEADER_TOP_FIXED") + ");");
+    if (state.header === "side") {
+      L.push(K.fn("lv_obj_add_flag") + "(" + K.fn("lv_menu_get_main_header") + "(menu), " +
+        K.num("LV_OBJ_FLAG_HIDDEN") + ");" + K.cm("  /* 标题栏移到侧栏 */"));
+    }
+    if (!state.sideTitle) {
+      L.push(K.fn("lv_obj_add_flag") + "(" + K.fn("lv_menu_get_sidebar_header") + "(menu), " +
+        K.num("LV_OBJ_FLAG_HIDDEN") + ");");
+    }
+    L.push(K.fn("lv_menu_set_mode_root_back_button") + "(menu, " +
+      K.num(state.rootBack ? "LV_MENU_ROOT_BACK_BUTTON_ENABLED" : "LV_MENU_ROOT_BACK_BUTTON_DISABLED") + ");");
+    L.push("bool is_root = " + K.fn("lv_menu_back_button_is_root") + "(menu, " +
+      K.fn("lv_menu_get_main_header_back_button") + "(menu));");
+    K.code(L);
+  }
+
+  /* ---------- 导出 ---------- */
+  document.getElementById("btn-png").addEventListener("click", function () {
+    K.exportPng(view.canvas, "menu.png");
+  });
+
+  renderCode();
+})();
+</script>
+</body>
+</html>

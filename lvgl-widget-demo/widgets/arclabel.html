@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LVGL Arc Label 复刻与导出</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='11' fill='none' stroke='%23dfe4ea' stroke-width='2' stroke-dasharray='3 3'/%3E%3Cpath d='M7 18c2-6 16-6 18 0' fill='none' stroke='%232b7de9' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="../assets/panel.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <a class="back" href="../index.html">← 返回画廊</a>
+    <h1>LVGL Arc Label 本地复刻</h1>
+    <p>文字沿圆弧排布并按切线方向旋转，半径、起始角、角度范围、方向与字间距实时可调，参数对齐 <code>lv_arclabel_set_radius()</code> / <code>lv_arclabel_set_angle_start()</code> / <code>lv_arclabel_set_dir()</code>。</p>
+  </header>
+
+  <div class="stage">
+    <div class="stage-canvas-box"><canvas id="view"></canvas></div>
+  </div>
+
+  <section class="panel">
+    <h2>参数（对应 LVGL 接口）</h2>
+    <div class="grid">
+      <div class="field wide">
+        <label>文本 set_text</label>
+        <input type="text" id="text" value="LVGL · ARC LABEL · 弧形文字 · " maxlength="60">
+      </div>
+      <div class="field">
+        <label>半径 set_radius <output id="o-radius">90 px</output></label>
+        <input type="range" id="radius" min="60" max="140" step="1" value="90">
+      </div>
+      <div class="field">
+        <label>起始角 set_angle_start <output id="o-start">200°</output></label>
+        <input type="range" id="start" min="0" max="359" step="1" value="200">
+      </div>
+      <div class="field">
+        <label>角度范围 set_angle_size <output id="o-span">220°</output></label>
+        <input type="range" id="span" min="30" max="360" step="1" value="220">
+      </div>
+      <div class="field">
+        <label>字间距 letter_space <output id="o-space">2 px</output></label>
+        <input type="range" id="space" min="0" max="8" step="1" value="2">
+      </div>
+      <div class="field">
+        <label>方向 set_dir</label>
+        <div class="seg" id="dir">
+          <button type="button" data-val="cw" class="active">顺时针</button>
+          <button type="button" data-val="ccw">逆时针</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>垂直对齐 text_vertical_align</label>
+        <div class="seg" id="valign">
+          <button type="button" data-val="top">上</button>
+          <button type="button" data-val="middle" class="active">中</button>
+          <button type="button" data-val="bottom">下</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>溢出 set_overflow</label>
+        <div class="seg" id="overflow">
+          <button type="button" data-val="visible" class="active">VISIBLE</button>
+          <button type="button" data-val="clip">CLIP</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>自动旋转</label>
+        <div class="check"><input type="checkbox" id="auto" checked><span>整圈文字持续绕圆心旋转</span></div>
+      </div>
+      <div class="field">
+        <label>参考圆</label>
+        <div class="check"><input type="checkbox" id="ref" checked><span>显示虚线参考圆与圆心</span></div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button type="button" class="btn primary" id="btn-gif">导出 GIF</button>
+      <button type="button" class="btn" id="btn-png">导出 PNG</button>
+    </div>
+    <div class="status" id="status"></div>
+  </section>
+
+  <pre class="code" id="code"></pre>
+
+  <footer>画布尺寸 320×240；半径较大时圆弧会超出画布并被裁掉，属正常现象。GIF 编码由 gif.js（jsDelivr CDN）完成，需联网；PNG 导出离线可用，WebM 录制基于浏览器原生 MediaRecorder，同样可离线使用。</footer>
+</div>
+
+<script src="../assets/widget-kit.js"></script>
+<script>
+(function () {
+  "use strict";
+  var K = LVKit, W = 320, H = 240;
+  var CX = 160, CY = 120, FONT_SIZE = 15;
+
+  var state = {
+    text: "LVGL · ARC LABEL · 弧形文字 · ",
+    radius: 90,
+    start: 200,
+    span: 220,
+    space: 2,
+    dir: "cw",
+    valign: "middle",
+    overflow: "visible",
+    auto: true,
+    ref: true
+  };
+
+  var view = K.view(document.getElementById("view"));
+  view.resize(W, H);
+  var t0 = performance.now();
+
+  function drawScene(c, tMs, spinOn) {
+    c.clearRect(0, 0, W, H);
+    K.box(c, 12, 8, W - 24, H - 16, {
+      bg: "#ffffff", radius: 14, borderWidth: 1, border: "#e7eaee",
+      shadow: "rgba(28,33,40,0.07)", shadowBlur: 14, shadowY: 4
+    });
+
+    K.text(c, "lv_arclabel", 24, 22, { size: 13, weight: 600, color: K.theme.text });
+    K.text(c, "R " + state.radius + " · " + state.start + "° + " + state.span + "°",
+      W - 24, 22, { size: 10.5, mono: true, color: K.theme.textFaint, align: "right" });
+
+    var dir = state.dir === "cw" ? 1 : -1;
+    var spin = spinOn ? tMs * 0.024 : 0;
+    var start = state.start + spin;
+    var radius = state.radius;
+
+    /* 参考圆 */
+    if (state.ref) {
+      c.save();
+      c.setLineDash([4, 4]);
+      c.strokeStyle = "#cfd7e2";
+      c.lineWidth = 1;
+      c.beginPath();
+      c.arc(CX, CY, radius, 0, Math.PI * 2);
+      c.stroke();
+      c.setLineDash([]);
+
+      /* 起始角标记 */
+      var sx = CX + Math.cos(K.rad(start)) * radius;
+      var sy = CY + Math.sin(K.rad(start)) * radius;
+      c.globalAlpha = 0.5;
+      c.beginPath();
+      c.moveTo(CX, CY);
+      c.lineTo(sx, sy);
+      c.strokeStyle = "#9fb6d4";
+      c.stroke();
+      c.globalAlpha = 1;
+      c.beginPath();
+      c.arc(sx, sy, 2.4, 0, Math.PI * 2);
+      c.fillStyle = K.theme.primary;
+      c.fill();
+
+      c.beginPath();
+      c.arc(CX, CY, 2, 0, Math.PI * 2);
+      c.fillStyle = "#b8bfc9";
+      c.fill();
+      c.restore();
+
+      K.text(c, "r = " + radius, CX, CY + 14, {
+        size: 9.5, mono: true, color: K.theme.textFaint, align: "center"
+      });
+    }
+
+    /* 角度范围提示弧：随起止角与范围实时变化 */
+    c.save();
+    c.globalAlpha = 0.28;
+    c.strokeStyle = K.theme.primary;
+    c.lineWidth = 2;
+    c.lineCap = "round";
+    c.beginPath();
+    c.arc(CX, CY, radius, K.rad(start), K.rad(start + dir * state.span), dir < 0);
+    c.stroke();
+    c.restore();
+
+    /* 逐字沿弧排布 */
+    var text = state.text || "";
+    var chars = [];
+    var total = 0;
+    var i;
+    for (i = 0; i < text.length; i++) {
+      var w = K.measure(c, text[i], { size: FONT_SIZE, weight: 600 });
+      chars.push({ ch: text[i], w: w, offset: total });
+      total += w + (i < text.length - 1 ? state.space : 0);
+    }
+
+    var offsetY = state.valign === "top" ? -FONT_SIZE * 0.55 * dir
+      : (state.valign === "bottom" ? FONT_SIZE * 0.55 * dir : 0);
+
+    c.save();
+    if (state.overflow === "clip") {
+      var outer = radius + FONT_SIZE * 1.3;
+      var inner = Math.max(4, radius - FONT_SIZE * 1.3);
+      var a0 = K.rad(start);
+      var a1 = K.rad(start + dir * state.span);
+      c.beginPath();
+      c.arc(CX, CY, outer, a0, a1, dir < 0);
+      c.arc(CX, CY, inner, a1, a0, dir > 0);
+      c.closePath();
+      c.clip();
+    }
+
+    for (i = 0; i < chars.length; i++) {
+      var d = chars[i].offset + chars[i].w / 2;
+      var ang = start + dir * K.deg(d / radius);
+      var px = CX + Math.cos(K.rad(ang)) * radius;
+      var py = CY + Math.sin(K.rad(ang)) * radius;
+
+      c.save();
+      c.translate(px, py);
+      c.rotate(K.rad(dir > 0 ? ang + 90 : ang - 90));
+      K.text(c, chars[i].ch, 0, offsetY, {
+        size: FONT_SIZE, weight: 600, color: K.theme.text,
+        align: "center", baseline: "middle"
+      });
+      c.restore();
+    }
+    c.restore();
+
+    K.text(c, state.auto ? "自动旋转中 · 点击画面暂停" : "已暂停 · 点击画面恢复旋转", W / 2, 226, {
+      size: 10.5, color: K.theme.textFaint, align: "center"
+    });
+  }
+
+  /* ---------- 代码 ---------- */
+  function renderCode() {
+    var dir = state.dir === "cw" ? "LV_ARCLABEL_DIR_CLOCKWISE" : "LV_ARCLABEL_DIR_COUNTER_CLOCKWISE";
+    var valign = state.valign === "top" ? "LV_ARCLABEL_TEXT_ALIGN_LEADING"
+      : (state.valign === "bottom" ? "LV_ARCLABEL_TEXT_ALIGN_TRAILING" : "LV_ARCLABEL_TEXT_ALIGN_CENTER");
+    var of = state.overflow === "clip" ? "LV_ARCLABEL_OVERFLOW_CLIP" : "LV_ARCLABEL_OVERFLOW_VISIBLE";
+    var L = [];
+    L.push(K.cm("/* 由页面参数实时生成；0° 在 3 点钟方向，角度顺时针增长 */"));
+    L.push("lv_obj_t * arclabel = " + K.fn("lv_arclabel_create") + "(lv_screen_active());");
+    L.push(K.fn("lv_arclabel_set_text") + "(arclabel, " + JSON.stringify(state.text || "") + ");");
+    L.push(K.fn("lv_arclabel_set_radius") + "(arclabel, " + K.num(state.radius) + ");");
+    L.push(K.fn("lv_arclabel_set_angle_start") + "(arclabel, " + K.num(state.start) + ");");
+    L.push(K.fn("lv_arclabel_set_angle_size") + "(arclabel, " + K.num(state.span) + ");");
+    L.push(K.fn("lv_arclabel_set_dir") + "(arclabel, " + K.num(dir) + ");");
+    L.push(K.fn("lv_arclabel_set_text_vertical_align") + "(arclabel, " + K.num(valign) + ");");
+    L.push(K.fn("lv_arclabel_set_overflow") + "(arclabel, " + K.num(of) + ");");
+    L.push(K.fn("lv_obj_set_style_text_letter_space") + "(arclabel, " + K.num(state.space) + ", 0);");
+    L.push(K.fn("lv_obj_set_size") + "(arclabel, " + K.num(280) + ", " + K.num(200) + ");");
+    L.push(K.fn("lv_obj_center") + "(arclabel);");
+    if (state.auto) {
+      L.push(K.cm("/* 自动旋转：用 lv_anim 持续修改整圈 offset */"));
+      L.push(K.cm("lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)lv_arclabel_set_offset);"));
+    }
+    K.code(L);
+  }
+
+  /* ---------- 控件 ---------- */
+  document.getElementById("text").addEventListener("input", function (e) {
+    state.text = e.target.value;
+    renderCode();
+  });
+  K.bindRange("radius", function (v) { return v + " px"; }, function (v) {
+    state.radius = v;
+    renderCode();
+  });
+  K.bindRange("start", function (v) { return v + "°"; }, function (v) {
+    state.start = v;
+    renderCode();
+  });
+  K.bindRange("span", function (v) { return v + "°"; }, function (v) {
+    state.span = v;
+    renderCode();
+  });
+  K.bindRange("space", function (v) { return v + " px"; }, function (v) {
+    state.space = v;
+    renderCode();
+  });
+  K.bindSeg("dir", function (v) {
+    state.dir = v;
+    renderCode();
+  });
+  K.bindSeg("valign", function (v) {
+    state.valign = v;
+    renderCode();
+  });
+  K.bindSeg("overflow", function (v) {
+    state.overflow = v;
+    renderCode();
+  });
+  K.bindCheck("auto", function (on) {
+    state.auto = on;
+    renderCode();
+  });
+  K.bindCheck("ref", function (on) {
+    state.ref = on;
+  });
+  view.canvas.addEventListener("pointerdown", function () {
+    state.auto = !state.auto;
+    document.getElementById("auto").checked = state.auto;
+    renderCode();
+  });
+
+  /* ---------- 导出 ---------- */
+  document.getElementById("btn-png").addEventListener("click", function () {
+    K.exportPng(view.canvas, "arclabel.png");
+  });
+
+  document.getElementById("btn-gif").addEventListener("click", function () {
+    var btn = this;
+    btn.disabled = true;
+    K.exportGif({
+      name: "arclabel.gif", w: W, h: H, fps: 20, duration: 4000,
+      frame: function (c, t) { drawScene(c, t, true); },
+      onDone: function () { btn.disabled = false; },
+      onError: function () { btn.disabled = false; }
+    });
+  });
+
+  K.run(function (now) {
+    drawScene(view.ctx, now - t0, state.auto);
+  });
+
+  renderCode();
+})();
+</script>
+</body>
+</html>

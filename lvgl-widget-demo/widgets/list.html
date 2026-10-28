@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LVGL List 复刻与导出</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='5' y='4' width='22' height='24' rx='4' fill='%232b7de9'/%3E%3Cg fill='%23fff'%3E%3Crect x='8' y='8' width='16' height='1.6'/%3E%3Crect x='8' y='13' width='12' height='1.6'/%3E%3Crect x='8' y='18' width='14' height='1.6'/%3E%3Crect x='8' y='23' width='10' height='1.6'/%3E%3C/g%3E%3C/svg%3E">
+<link rel="stylesheet" href="../assets/panel.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <a class="back" href="../index.html">← 返回画廊</a>
+    <h1>LVGL List 本地复刻</h1>
+    <p>带标题与图标的可滚动列表，参数对齐 <code>lv_list_add_text()</code> / <code>lv_list_add_button()</code> 与 <code>lv_obj_set_scrollbar_mode()</code>，点击条目高亮，支持滚轮、拖动与自动滚动。</p>
+  </header>
+
+  <div class="stage">
+    <div class="stage-canvas-box"><canvas id="view"></canvas></div>
+  </div>
+
+  <section class="panel">
+    <h2>参数（对应 LVGL 接口）</h2>
+    <div class="grid">
+      <div class="field wide">
+        <label>标题文本 set_text</label>
+        <input type="text" id="title" value="快捷入口" maxlength="12">
+      </div>
+      <div class="field">
+        <label>条目数 <output id="o-count">5</output></label>
+        <input type="range" id="count" min="2" max="8" step="1" value="5">
+      </div>
+      <div class="field">
+        <label>显示图标</label>
+        <div class="check"><input type="checkbox" id="icons" checked><span>为每个条目绘制图标</span></div>
+      </div>
+      <div class="field">
+        <label>显示滚动条</label>
+        <div class="check"><input type="checkbox" id="scrollbar" checked><span>内容超出时显示</span></div>
+      </div>
+      <div class="field">
+        <label>自动滚动演示</label>
+        <div class="check"><input type="checkbox" id="auto"><span>来回滚动（导出动图用）</span></div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button type="button" class="btn" id="btn-add">＋ 添加条目</button>
+      <button type="button" class="btn" id="btn-del">－ 删除条目</button>
+      <button type="button" class="btn primary" id="btn-gif">导出 GIF</button>
+      <button type="button" class="btn" id="btn-webm">录制 WebM</button>
+      <button type="button" class="btn" id="btn-png">导出 PNG</button>
+    </div>
+    <div class="status" id="status"></div>
+  </section>
+
+  <pre class="code" id="code"></pre>
+
+  <footer>画布尺寸 320×240。GIF 编码由 gif.js（jsDelivr CDN）完成，需联网；WebM 使用浏览器原生 MediaRecorder，离线可用。在列表区域滚动或拖动可翻阅条目。</footer>
+</div>
+
+<script src="../assets/widget-kit.js"></script>
+<script>
+(function () {
+  "use strict";
+  var K = LVKit, W = 320, H = 240;
+
+  var POOL = [
+    { icon: "home", label: "首页", sym: "LV_SYMBOL_HOME" },
+    { icon: "user", label: "用户中心", sym: "LV_SYMBOL_USER" },
+    { icon: "gear", label: "设置", sym: "LV_SYMBOL_SETTINGS" },
+    { icon: "bell", label: "通知", sym: "LV_SYMBOL_BELL" },
+    { icon: "trash", label: "回收站", sym: "LV_SYMBOL_TRASH" },
+    { icon: "folder", label: "我的文件", sym: "LV_SYMBOL_DIRECTORY" },
+    { icon: "search", label: "搜索", sym: "LV_SYMBOL_SEARCH" },
+    { icon: "wifi", label: "网络", sym: "LV_SYMBOL_WIFI" }
+  ];
+
+  var state = {
+    title: "快捷入口",
+    count: 5,
+    icons: true,
+    showScrollbar: true,
+    auto: false,
+    sel: 0,
+    scroll: 0
+  };
+
+  var view = K.view(document.getElementById("view"));
+  view.resize(W, H);
+
+  var t0 = performance.now();
+  var autoStart = 0;
+  var hitItems = [];
+  var drag = { active: false, y0: 0, s0: 0, moved: false };
+
+  function metrics() {
+    var cardX = 36, cardY = 24, cardW = 248, cardH = 192, titleH = 34;
+    var viewX = cardX + 1, viewY = cardY + titleH;
+    var viewW = cardW - 2, viewH = cardH - titleH - 1;
+    var itemH = 44;
+    var contentH = state.count * itemH + 10;
+    var maxScroll = Math.max(0, contentH - (viewH - 4));
+    return {
+      cardX: cardX, cardY: cardY, cardW: cardW, cardH: cardH, titleH: titleH,
+      viewX: viewX, viewY: viewY, viewW: viewW, viewH: viewH,
+      itemH: itemH, contentH: contentH, maxScroll: maxScroll
+    };
+  }
+
+  function scrollAt(t) {
+    var m = metrics();
+    if (m.maxScroll <= 0) return 0;
+    var cycle = 3200;
+    var k = 0.5 - 0.5 * Math.cos((t % cycle) / cycle * Math.PI * 2);
+    return m.maxScroll * k;
+  }
+
+  /* ---------- 绘制 ---------- */
+  function drawScene(c, t, forceAuto) {
+    var m = metrics();
+    var autoOn = forceAuto || state.auto;
+    var sc = autoOn ? scrollAt(t) : state.scroll;
+    sc = K.clamp(sc, 0, m.maxScroll);
+
+    c.clearRect(0, 0, W, H);
+    c.fillStyle = "#ffffff";
+    c.fillRect(0, 0, W, H);
+
+    K.box(c, m.cardX, m.cardY, m.cardW, m.cardH, {
+      bg: "#ffffff", radius: 14, borderWidth: 1, border: K.theme.border,
+      shadow: K.alpha("#1c2128", 0.08), shadowBlur: 14, shadowY: 4
+    });
+
+    K.text(c, state.title || "列表", m.cardX + 14, m.cardY + 18, {
+      size: 13, weight: 600, color: K.theme.textMuted
+    });
+    c.fillStyle = "#eceff3";
+    c.fillRect(m.cardX + 1, m.cardY + m.titleH - 1, m.cardW - 2, 1);
+
+    hitItems = [];
+    c.save();
+    c.beginPath();
+    c.rect(m.viewX, m.viewY, m.viewW, m.viewH);
+    c.clip();
+
+    for (var i = 0; i < state.count; i++) {
+      var iy = m.viewY + 4 - sc + i * m.itemH;
+      var item = POOL[i % POOL.length];
+      var sel = (i === state.sel);
+
+      if (iy + m.itemH >= m.viewY && iy <= m.viewY + m.viewH) {
+        if (sel) {
+          K.box(c, m.viewX + 8, iy + 3, m.viewW - 22, m.itemH - 6, {
+            bg: "#eaf1fd", radius: 8
+          });
+        }
+        if (state.icons) {
+          K.icon(c, item.icon, m.viewX + 16, iy + m.itemH / 2 - 8, 16,
+            sel ? K.theme.primary : K.theme.textMuted);
+        }
+        K.text(c, item.label, m.viewX + (state.icons ? 42 : 16), iy + m.itemH / 2 + 1, {
+          size: 14, weight: sel ? 600 : 400,
+          color: sel ? K.theme.primary : K.theme.text
+        });
+        K.text(c, "›", m.viewX + m.viewW - 18, iy + m.itemH / 2, {
+          size: 17, color: "#b8bfc9", align: "center"
+        });
+      }
+
+      if (i < state.count - 1) {
+        c.fillStyle = "#eef0f3";
+        c.fillRect(m.viewX + 14, iy + m.itemH, m.viewW - 28, 1);
+      }
+
+      hitItems.push({ i: i, y: iy, h: m.itemH });
+    }
+
+    c.restore();
+
+    if (state.showScrollbar && m.maxScroll > 0.5) {
+      var trackX = m.viewX + m.viewW - 7;
+      var trackY = m.viewY + 6;
+      var trackH = m.viewH - 12;
+      var thumbH = Math.max(22, trackH * (m.viewH / m.contentH));
+      var thumbY = trackY + (trackH - thumbH) * (sc / m.maxScroll);
+      K.box(c, trackX, trackY, 4, trackH, { bg: "#eef0f3", radius: 2 });
+      K.box(c, trackX, thumbY, 4, thumbH, { bg: "#c2c8d1", radius: 2 });
+    }
+
+    K.text(c, "点击条目高亮 · 滚轮 / 拖动滚动", W / 2, H - 12, {
+      size: 11, color: K.theme.textFaint, align: "center"
+    });
+  }
+
+  K.run(function (now) {
+    var t = state.auto ? now - autoStart : now - t0;
+    if (state.auto) {
+      state.scroll = scrollAt(t);
+    } else {
+      state.scroll = K.clamp(state.scroll, 0, metrics().maxScroll);
+    }
+    drawScene(view.ctx, t, false);
+  });
+
+  /* ---------- 交互 ---------- */
+  function posOf(e) {
+    var r = view.canvas.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  }
+
+  function stopAuto() {
+    if (state.auto) {
+      state.auto = false;
+      document.getElementById("auto").checked = false;
+    }
+  }
+
+  function inView(p) {
+    var m = metrics();
+    return p.x >= m.viewX && p.x <= m.viewX + m.viewW && p.y >= m.viewY && p.y <= m.viewY + m.viewH;
+  }
+
+  function selectAt(p) {
+    var m = metrics();
+    var idx = Math.floor((p.y - (m.viewY + 4) + state.scroll) / m.itemH);
+    if (idx >= 0 && idx < state.count) {
+      state.sel = idx;
+      renderCode();
+    }
+  }
+
+  view.canvas.addEventListener("pointerdown", function (e) {
+    var p = posOf(e);
+    if (!inView(p)) return;
+    stopAuto();
+    drag.active = true;
+    drag.y0 = p.y;
+    drag.s0 = state.scroll;
+    drag.moved = false;
+  });
+
+  view.canvas.addEventListener("pointermove", function (e) {
+    if (!drag.active) return;
+    var p = posOf(e);
+    var dy = p.y - drag.y0;
+    if (Math.abs(dy) > 3) drag.moved = true;
+    state.scroll = K.clamp(drag.s0 - dy, 0, metrics().maxScroll);
+  });
+
+  view.canvas.addEventListener("pointerup", function (e) {
+    if (!drag.active) return;
+    var p = posOf(e);
+    if (!drag.moved && inView(p)) selectAt(p);
+    drag.active = false;
+  });
+
+  view.canvas.addEventListener("pointercancel", function () { drag.active = false; });
+
+  view.canvas.addEventListener("wheel", function (e) {
+    stopAuto();
+    state.scroll = K.clamp(state.scroll + e.deltaY, 0, metrics().maxScroll);
+    e.preventDefault();
+  }, { passive: false });
+
+  /* ---------- 参数 ---------- */
+  function setCount(n) {
+    state.count = K.clamp(n, 2, 8);
+    state.sel = K.clamp(state.sel, 0, state.count - 1);
+    document.getElementById("count").value = state.count;
+    document.getElementById("o-count").textContent = state.count;
+    state.scroll = K.clamp(state.scroll, 0, metrics().maxScroll);
+    renderCode();
+  }
+
+  document.getElementById("title").addEventListener("input", function (e) {
+    state.title = e.target.value;
+    renderCode();
+  });
+
+  K.bindRange("count", null, function (v) { setCount(v); });
+  K.bindCheck("icons", function (on) { state.icons = on; renderCode(); });
+  K.bindCheck("scrollbar", function (on) { state.showScrollbar = on; renderCode(); });
+  K.bindCheck("auto", function (on) {
+    state.auto = on;
+    autoStart = performance.now();
+  });
+
+  document.getElementById("btn-add").addEventListener("click", function () { setCount(state.count + 1); });
+  document.getElementById("btn-del").addEventListener("click", function () { setCount(state.count - 1); });
+
+  /* ---------- C 代码 ---------- */
+  function renderCode() {
+    var L = [];
+    L.push(K.cm("/* 由页面参数实时生成 */"));
+    L.push("lv_obj_t * list = " + K.fn("lv_list_create") + "(lv_screen_active());");
+    L.push(K.fn("lv_obj_set_size") + "(list, " + K.num(248) + ", " + K.num(192) + ");");
+    L.push(K.fn("lv_obj_center") + "(list);");
+    L.push("");
+    L.push("lv_obj_t * sect = " + K.fn("lv_list_add_text") + "(list, " + JSON.stringify(state.title || "") + ");");
+    for (var i = 0; i < state.count; i++) {
+      var item = POOL[i % POOL.length];
+      var iconArg = state.icons ? K.num(item.sym) : "NULL";
+      L.push("lv_obj_t * b" + i + " = " + K.fn("lv_list_add_button") + "(list, " + iconArg + ", " +
+        JSON.stringify(item.label) + ");");
+    }
+    L.push("");
+    L.push("const char * txt = " + K.fn("lv_list_get_button_text") + "(list, b0);");
+    if (state.sel < state.count) {
+      L.push(K.fn("lv_obj_add_state") + "(b" + state.sel + ", " + K.num("LV_STATE_CHECKED") + ");");
+    }
+    L.push(K.fn("lv_obj_set_style_bg_color") + "(list, " + K.fn("lv_color_hex") + "(" + K.num("0xffffff") + "), LV_PART_MAIN);");
+    L.push(K.fn("lv_obj_set_style_border_width") + "(list, " + K.num(1) + ", LV_PART_MAIN);");
+    L.push(K.fn("lv_obj_set_scrollbar_mode") + "(list, " +
+      K.num(state.showScrollbar ? "LV_SCROLLBAR_MODE_AUTO" : "LV_SCROLLBAR_MODE_OFF") + ");");
+    K.code(L);
+  }
+
+  /* ---------- 导出 ---------- */
+  document.getElementById("btn-png").addEventListener("click", function () {
+    K.exportPng(view.canvas, "list.png");
+  });
+
+  document.getElementById("btn-gif").addEventListener("click", function () {
+    var btn = this;
+    btn.disabled = true;
+    K.exportGif({
+      name: "list.gif", w: W, h: H, fps: 16, duration: 3200,
+      frame: function (c, t) { drawScene(c, t, true); },
+      onDone: function () { btn.disabled = false; },
+      onError: function () { btn.disabled = false; }
+    });
+  });
+
+  document.getElementById("btn-webm").addEventListener("click", function () {
+    var btn = this;
+    btn.disabled = true;
+    K.exportWebm({
+      canvas: view.canvas, name: "list.webm", duration: 3200,
+      before: function () {
+        var old = state.auto;
+        state.auto = true;
+        autoStart = performance.now();
+        document.getElementById("auto").checked = true;
+        return old;
+      },
+      after: function (old) {
+        state.auto = old;
+        document.getElementById("auto").checked = old;
+      },
+      onDone: function () { btn.disabled = false; },
+      onError: function () { btn.disabled = false; }
+    });
+  });
+
+  syncCountUI();
+  renderCode();
+
+  function syncCountUI() {
+    document.getElementById("count").value = state.count;
+    document.getElementById("o-count").textContent = state.count;
+  }
+})();
+</script>
+</body>
+</html>

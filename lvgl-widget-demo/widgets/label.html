@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LVGL Label 复刻与导出</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='3' y='9' width='26' height='14' rx='3' fill='none' stroke='%232b7de9' stroke-width='2'/%3E%3Crect x='8' y='14' width='16' height='2' rx='1' fill='%232b7de9'/%3E%3Crect x='8' y='18' width='10' height='2' rx='1' fill='%23b9c3d1'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="../assets/panel.css">
+<style>
+  /* 仅本页需要的极小补充：把 LVGL 接口名单独放一行 */
+  .field label{flex-wrap:wrap;row-gap:2px}
+  .field label .api{order:3;flex-basis:100%;font-family:var(--mono);font-size:11px;color:var(--ink-3);line-height:1.5}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>LVGL Label 本地复刻</h1>
+    <p>同一段文字，换一种 <code>long_mode</code> 就得到裁剪 / 省略 / 换行 / 循环滚动四种效果，字号、颜色、对齐与宽度实时可调，可直接导出 GIF / WebM 留档。</p>
+  </header>
+
+  <div class="stage">
+    <div class="stage-canvas-box"><canvas id="view"></canvas></div>
+  </div>
+
+  <section class="panel">
+    <h2>参数（对应 LVGL 接口）</h2>
+    <div class="grid">
+      <div class="field wide">
+        <label>文本内容 text<span class="api">lv_label_set_text(label, "…")</span></label>
+        <div class="seg" id="textmode">
+          <button type="button" data-v="short" class="active">短文本</button>
+          <button type="button" data-v="long">超长文本</button>
+          <button type="button" data-v="cn">中文段落</button>
+        </div>
+      </div>
+
+      <div class="field wide">
+        <label>长文本模式 long_mode<span class="api">lv_label_set_long_mode()</span></label>
+        <div class="seg" id="longmode">
+          <button type="button" data-v="clip" class="active">裁剪</button>
+          <button type="button" data-v="dot">省略号</button>
+          <button type="button" data-v="wrap">自动换行</button>
+          <button type="button" data-v="scroll">循环滚动</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>字号 font<output id="o-size">18 px</output><span class="api">lv_obj_set_style_text_font</span></label>
+        <input type="range" id="size" min="10" max="40" step="1" value="18">
+      </div>
+      <div class="field">
+        <label>文字颜色 color<output id="o-color">#1c2128</output><span class="api">lv_obj_set_style_text_color</span></label>
+        <input type="color" id="color" value="#1c2128">
+      </div>
+
+      <div class="field">
+        <label>对齐 align<span class="api">lv_obj_set_style_text_align</span></label>
+        <div class="seg" id="align">
+          <button type="button" data-v="left" class="active">左</button>
+          <button type="button" data-v="center">中</button>
+          <button type="button" data-v="right">右</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>宽度 width<output id="o-w">200 px</output><span class="api">lv_obj_set_width</span></label>
+        <input type="range" id="w" min="80" max="320" step="1" value="200">
+      </div>
+
+      <div class="field wide">
+        <label>自动滚动<span class="api">LV_LABEL_LONG_SCROLL_CIRCULAR 时生效，文字横向持续滚动</span></label>
+        <div class="check"><input type="checkbox" id="scroll" checked><span>文字超出宽度时循环滚动</span></div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button type="button" class="btn primary" id="btn-gif">导出 GIF（一轮滚动）</button>
+      <button type="button" class="btn" id="btn-webm">录制 WebM（一轮滚动）</button>
+    </div>
+    <div class="status" id="status"></div>
+  </section>
+
+  <pre class="code" id="code"></pre>
+
+  <footer>GIF 编码由 gif.js（jsDelivr CDN）完成，需联网；WebM 使用浏览器原生 MediaRecorder，离线可用。虚线框代表 <code>lv_obj_set_width()</code> 设定的标签宽度。</footer>
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  var TEXT = {
+    short: "Hello LVGL",
+    long: "The quick brown fox jumps over the lazy dog 0123456789",
+    cn: "LVGL 是一个轻量级嵌入式图形库，用最少的资源绘制漂亮的界面，适合单片机与小型屏幕。"
+  };
+
+  var LONG_MODE = {
+    clip:   "LV_LABEL_LONG_CLIP",
+    dot:    "LV_LABEL_LONG_DOT",
+    wrap:   "LV_LABEL_LONG_WRAP",
+    scroll: "LV_LABEL_LONG_SCROLL_CIRCULAR"
+  };
+
+  var ALIGN = {
+    left:   "LV_TEXT_ALIGN_LEFT",
+    center: "LV_TEXT_ALIGN_CENTER",
+    right:  "LV_TEXT_ALIGN_RIGHT"
+  };
+
+  var state = {
+    textMode: "short",      // short | long | cn
+    longMode: "clip",       // clip | dot | wrap | scroll
+    size: 18,
+    color: "#1c2128",
+    align: "left",          // left | center | right
+    width: 200,
+    autoScroll: true
+  };
+
+  var STAGE_W = 360;
+  var STAGE_H = 220;
+  var FAMILY = '-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif';
+  var SCROLL_SPEED = 55;    // px / s
+  var GAP = 48;             // 循环滚动两段之间的空隙
+
+  var canvas = document.getElementById("view");
+  var ctx = canvas.getContext("2d");
+  var statusEl = document.getElementById("status");
+  var t0 = performance.now();
+
+  /* ---------- 工具 ---------- */
+  function lineHeight(){ return Math.round(state.size * 1.5); }
+
+  function fontString(){ return "400 " + state.size + "px " + FAMILY; }
+
+  /* 逐字换行：英文尽量在空格处断开，中文任意位置可断 */
+  function wrapLines(c, text, maxW){
+    var lines = [];
+    var line = "";
+    for(var i = 0; i < text.length; i++){
+      var ch = text.charAt(i);
+      var test = line + ch;
+      if(line && c.measureText(test).width > maxW){
+        var sp = line.lastIndexOf(" ");
+        if(sp > 0 && /[A-Za-z0-9]/.test(ch)){
+          lines.push(line.slice(0, sp));
+          line = line.slice(sp + 1) + ch;
+        }else{
+          lines.push(line);
+          line = (ch === " ") ? "" : ch;
+        }
+      }else{
+        line = test;
+      }
+    }
+    if(line) lines.push(line);
+    return lines.length ? lines : [""];
+  }
+
+  /* 超宽时尾部省略号 */
+  function ellipsize(c, text, maxW){
+    if(c.measureText(text).width <= maxW) return text;
+    var n = text.length - 1;
+    while(n > 0 && c.measureText(text.slice(0, n) + "…").width > maxW) n--;
+    return n > 0 ? text.slice(0, n) + "…" : "";
+  }
+
+  /* ---------- 绘制 ---------- */
+  function draw(c, tMs){
+    c.clearRect(0, 0, STAGE_W, STAGE_H);
+
+    var text = TEXT[state.textMode];
+    var lh = lineHeight();
+    var maxW = state.width;
+    var mode = state.longMode;
+
+    c.font = fontString();
+    c.textBaseline = "middle";
+    c.textAlign = "left";
+
+    var lines;
+    if(mode === "wrap"){
+      lines = wrapLines(c, text, maxW);
+    }else if(mode === "dot"){
+      lines = [ellipsize(c, text, maxW)];
+    }else{
+      lines = [text];
+    }
+
+    var boxH = lh * lines.length;
+    var bx = (STAGE_W - maxW) / 2;
+    var by = (STAGE_H - boxH) / 2;
+
+    /* 宽度参考框 */
+    c.save();
+    c.setLineDash([4, 4]);
+    c.strokeStyle = "rgba(43,125,233,0.28)";
+    c.lineWidth = 1;
+    c.strokeRect(bx + 0.5, by + 0.5, maxW - 1, boxH - 1);
+    c.restore();
+
+    c.save();
+    c.beginPath();
+    c.rect(bx, by, maxW, boxH);
+    c.clip();
+    c.fillStyle = state.color;
+
+    if(mode === "scroll"){
+      var tw = c.measureText(text).width;
+      var y = by + lh / 2;
+      if(state.autoScroll && tw > maxW){
+        var total = tw + GAP;
+        var off = ((tMs / 1000) * SCROLL_SPEED) % total;
+        c.fillText(text, bx - off, y);
+        c.fillText(text, bx - off + total, y);
+      }else{
+        c.fillText(text, bx, y);
+      }
+    }else{
+      for(var i = 0; i < lines.length; i++){
+        var line = lines[i];
+        var lw = c.measureText(line).width;
+        var x = bx;
+        if(state.align === "center") x = bx + (maxW - lw) / 2;
+        else if(state.align === "right") x = bx + maxW - lw;
+        c.fillText(line, x, by + lh * (i + 0.5));
+      }
+    }
+    c.restore();
+  }
+
+  /* ---------- 高清适配 + 主循环 ---------- */
+  function fitCanvas(){
+    var dpr = window.devicePixelRatio || 1;
+    canvas.width = STAGE_W * dpr;
+    canvas.height = STAGE_H * dpr;
+    canvas.style.width = STAGE_W + "px";
+    canvas.style.height = STAGE_H + "px";
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  function setSeg(id, value){
+    var el = document.getElementById(id);
+    var btns = el.getElementsByTagName("button");
+    for(var i = 0; i < btns.length; i++){
+      btns[i].className = btns[i].getAttribute("data-v") === value ? "active" : "";
+    }
+  }
+
+  function loop(now){
+    draw(ctx, now - t0);
+    requestAnimationFrame(loop);
+  }
+
+  /* ---------- 等价 C 代码 ---------- */
+  function montserrat(size){
+    var n = Math.min(48, Math.max(8, Math.round(size / 2) * 2));
+    return "lv_font_montserrat_" + n;
+  }
+
+  function cstr(s){
+    return '"' + s.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
+  }
+
+  function renderCode(){
+    var hex = function(c){ return "0x" + c.replace("#", ""); };
+    var L = [];
+
+    L.push('<span class="cm">/* 由页面参数实时生成 */</span>');
+    L.push('lv_obj_t * label = <span class="fn">lv_label_create</span>(lv_screen_active());');
+    L.push('<span class="fn">lv_label_set_text</span>(label, ' + cstr(TEXT[state.textMode]) + ');');
+    L.push('<span class="fn">lv_obj_set_width</span>(label, <span class="num">' + state.width + '</span>);');
+    L.push('<span class="fn">lv_label_set_long_mode</span>(label, ' + LONG_MODE[state.longMode] + ');');
+
+    if(state.textMode === "cn"){
+      L.push('<span class="cm">/* 中文需换成含 CJK 的字库 */</span>');
+    }
+    L.push('<span class="fn">lv_obj_set_style_text_font</span>(label, &amp;' + montserrat(state.size) + ', <span class="num">0</span>);');
+    L.push('<span class="fn">lv_obj_set_style_text_color</span>(label, <span class="fn">lv_color_hex</span>(<span class="num">' + hex(state.color) + '</span>), <span class="num">0</span>);');
+    L.push('<span class="fn">lv_obj_set_style_text_align</span>(label, ' + ALIGN[state.align] + ', <span class="num">0</span>);');
+
+    if(state.longMode === "scroll"){
+      L.push('<span class="cm">/* 文字超出宽度时自动循环滚动，无需手动设动画 */</span>');
+    }
+    L.push('<span class="fn">lv_obj_center</span>(label);');
+
+    document.getElementById("code").innerHTML = L.join("\n");
+  }
+
+  /* ---------- 控件绑定 ---------- */
+  function setStatus(msg, ok){
+    statusEl.textContent = msg;
+    statusEl.className = "status" + (ok ? " ok" : "");
+  }
+
+  function bindSeg(id, key){
+    var el = document.getElementById(id);
+    el.addEventListener("click", function(e){
+      var btn = e.target.closest ? e.target.closest("button") : null;
+      if(!btn || btn.parentNode !== el) return;
+      state[key] = btn.getAttribute("data-v");
+      setSeg(id, state[key]);
+      renderCode();
+    });
+  }
+
+  bindSeg("textmode", "textMode");
+  bindSeg("longmode", "longMode");
+  bindSeg("align", "align");
+
+  document.getElementById("size").addEventListener("input", function(e){
+    state.size = Number(e.target.value);
+    document.getElementById("o-size").textContent = state.size + " px";
+    renderCode();
+  });
+  document.getElementById("color").addEventListener("input", function(e){
+    state.color = e.target.value;
+    document.getElementById("o-color").textContent = state.color;
+    renderCode();
+  });
+  document.getElementById("w").addEventListener("input", function(e){
+    state.width = Number(e.target.value);
+    document.getElementById("o-w").textContent = state.width + " px";
+    renderCode();
+  });
+  document.getElementById("scroll").addEventListener("change", function(e){
+    state.autoScroll = e.target.checked;
+  });
+
+  /* ---------- 下载 ---------- */
+  function download(blob, name){
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function(){ URL.revokeObjectURL(a.href); }, 2000);
+  }
+
+  /* ---------- GIF 导出 ---------- */
+  var gifLib = null;
+  function loadGif(){
+    if(gifLib) return Promise.resolve(gifLib);
+    return new Promise(function(resolve, reject){
+      var s = document.createElement("script");
+      s.src = "https://fastly.jsdelivr.net/npm/gif.js@0.2.0/dist/gif.js";
+      s.onload = function(){ gifLib = window.GIF; resolve(gifLib); };
+      s.onerror = function(){ reject(new Error("gif.js 加载失败（需联网），可改用 WebM")); };
+      document.head.appendChild(s);
+    });
+  }
+
+  var CYCLE = 2400;   // 录制/导出时长
+
+  document.getElementById("btn-gif").addEventListener("click", function(){
+    var btn = this;
+    btn.disabled = true;
+    setStatus("加载 GIF 编码器…");
+    loadGif().then(function(GIF){
+      var fps = 20;
+      var frames = Math.max(2, Math.round(CYCLE / 1000 * fps));
+      var workerUrl = "https://fastly.jsdelivr.net/npm/gif.js@0.2.0/dist/gif.worker.js";
+      var gif = new GIF({ workers: 2, quality: 10, width: STAGE_W, height: STAGE_H, workerScript: workerUrl });
+      var off = document.createElement("canvas");
+      off.width = STAGE_W; off.height = STAGE_H;
+      var octx = off.getContext("2d");
+      var i = 0;
+      var prev = state.autoScroll;
+      state.autoScroll = true;
+
+      function step(){
+        if(i < frames){
+          draw(octx, i / fps * 1000);
+          gif.addFrame(off, { delay: Math.round(1000 / fps), copy: true });
+          setStatus("渲染帧 " + (i + 1) + "/" + frames);
+          i++;
+          setTimeout(step, 0);
+        }else{
+          gif.on("finished", function(blob){
+            state.autoScroll = prev;
+            download(blob, "label.gif");
+            setStatus("GIF 已保存：" + frames + " 帧 / " + fps + "fps", true);
+            btn.disabled = false;
+          });
+          gif.on("progress", function(p){ setStatus("编码 GIF " + Math.round(p * 100) + "%"); });
+          gif.render();
+        }
+      }
+      step();
+    }).catch(function(err){
+      setStatus(err.message);
+      btn.disabled = false;
+    });
+  });
+
+  /* ---------- WebM 录制（原生，离线可用） ---------- */
+  document.getElementById("btn-webm").addEventListener("click", function(){
+    var btn = this;
+    if(!canvas.captureStream || typeof MediaRecorder === "undefined"){
+      setStatus("当前浏览器不支持 MediaRecorder，请用 Chrome/Edge");
+      return;
+    }
+    btn.disabled = true;
+    var prev = state.autoScroll;
+    state.autoScroll = true;
+
+    var stream = canvas.captureStream(30);
+    var rec = new MediaRecorder(stream, { mimeType: "video/webm" });
+    var chunks = [];
+    rec.ondataavailable = function(e){ if(e.data.size) chunks.push(e.data); };
+    rec.onstop = function(){
+      state.autoScroll = prev;
+      download(new Blob(chunks, { type: "video/webm" }), "label.webm");
+      setStatus("WebM 已保存（" + CYCLE + " ms）", true);
+      btn.disabled = false;
+    };
+    setStatus("录制中，约 " + Math.round(CYCLE / 1000) + " 秒…");
+    rec.start();
+    setTimeout(function(){ rec.stop(); }, CYCLE);
+  });
+
+  fitCanvas();
+  renderCode();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

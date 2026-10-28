@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LVGL 组件能力演示</title>
+<link rel="stylesheet" href="assets/theme.css">
+<link rel="stylesheet" href="assets/components.css">
+</head>
+<body>
+<div class="lv-page">
+  <header class="lv-topbar">
+    <div>
+      <h1 class="lv-topbar__title">LVGL 组件能力演示</h1>
+      <p class="lv-topbar__sub">纯前端复刻 · 配色/圆角/间距取自 LVGL v10 默认主题 · 可直接离线打开</p>
+    </div>
+    <div class="lv-topbar__spacer"></div>
+    <button class="lv-theme-btn" id="lv-theme-toggle" onclick="lvToggleTheme()">深色主题</button>
+  </header>
+
+  <div id="gallery"></div>
+
+  <div class="lv-note" style="margin-top:32px">
+    <h3 class="lv-note__title">说明</h3>
+    <ul>
+      <li>每个组件一个独立 HTML，互不影响，可单独分享或嵌入。</li>
+      <li>演示画布统一为 320×240（日历、键盘等个别页面略高），与官方 <code>examples/widgets</code> 的目标尺寸一致。</li>
+      <li>每页均提供参数调节、等效 C 代码，以及 PNG / GIF / WebM 导出。</li>
+      <li>覆盖 36 个控件、2 种布局（Flex / Grid）与 2 组样式（基础 / 状态过渡）。</li>
+    </ul>
+  </div>
+</div>
+<script src="assets/demo.js"></script>
+<script>lvRenderGallery();</script>
+</body>
+</html>

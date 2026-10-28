@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LVGL LED 复刻与导出</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='11' fill='%23e04b4b'/%3E%3Ccircle cx='12' cy='12' r='4' fill='%23fff' opacity='.55'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="../assets/panel.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <a class="back" href="../index.html">← 返回画廊</a>
+    <h1>LVGL LED 本地复刻</h1>
+    <p>径向渐变 + 外发光的指示灯，亮度、尺寸、颜色实时可调；下方固定展示「常亮 / 60% / 熄灭」三种参考状态。点击画布可开 / 关，参数对齐 <code>lv_led_set_brightness()</code>。</p>
+  </header>
+
+  <div class="stage">
+    <div class="stage-canvas-box"><canvas id="view"></canvas></div>
+  </div>
+
+  <section class="panel">
+    <h2>参数（对应 LVGL 接口）</h2>
+    <div class="grid">
+      <div class="field">
+        <label>LED 颜色 set_color</label>
+        <input type="color" id="color" value="#e04b4b">
+      </div>
+      <div class="field">
+        <label>亮度 brightness <output id="o-bright">255</output></label>
+        <input type="range" id="bright" min="0" max="255" step="1" value="255">
+      </div>
+      <div class="field">
+        <label>直径 set_size <output id="o-size">104 px</output></label>
+        <input type="range" id="size" min="40" max="140" step="2" value="104">
+      </div>
+      <div class="field">
+        <label>外发光强度 shadowBlur <output id="o-glow">18</output></label>
+        <input type="range" id="glow" min="0" max="40" step="1" value="18">
+      </div>
+      <div class="field">
+        <label>开关 lv_led_on / lv_led_off</label>
+        <div class="seg" id="power">
+          <button type="button" data-val="on" class="active">亮</button>
+          <button type="button" data-val="off">灭</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>自动呼吸（2400 ms 周期）</label>
+        <div class="check"><input type="checkbox" id="breath"><span>正弦脉动，亮度 80 → 255</span></div>
+      </div>
+      <div class="field wide">
+        <label>交互说明</label>
+        <div class="check"><span style="font-size:12px">在画布任意位置点击即可切换开 / 关；导出 GIF 时始终按呼吸周期渲染。</span></div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button type="button" class="btn primary" id="btn-gif">导出 GIF（呼吸）</button>
+      <button type="button" class="btn" id="btn-webm">录制 WebM（呼吸）</button>
+      <button type="button" class="btn" id="btn-png">导出 PNG</button>
+    </div>
+    <div class="status" id="status"></div>
+  </section>
+
+  <pre class="code" id="code"></pre>
+
+  <footer>画布尺寸 320×240。GIF 编码由 gif.js（jsDelivr CDN）完成，需联网；WebM 使用浏览器原生 MediaRecorder，离线可用。</footer>
+</div>
+
+<script src="../assets/widget-kit.js"></script>
+<script>
+(function () {
+  "use strict";
+  var K = LVKit, W = 320, H = 240;
+  var CYCLE = 2400;
+
+  var state = {
+    color: "#e04b4b",
+    bright: 255,
+    size: 104,
+    glow: 18,
+    on: true,
+    breath: false
+  };
+
+  var view = K.view(document.getElementById("view"));
+  view.resize(W, H);
+  var t0 = performance.now();
+
+  function breathAt(t) {
+    var k = 0.5 - 0.5 * Math.cos((t % CYCLE) / CYCLE * Math.PI * 2);
+    return Math.round(80 + 175 * k);
+  }
+
+  function ledBase(color, bright, on) {
+    if (!on) return "#3a3f45";
+    return K.mix("#3a3f45", color, K.clamp(bright / 255, 0, 1));
+  }
+
+  function drawLed(c, cx, cy, d, color, bright, glow, on) {
+    var r = d / 2;
+    var k = on ? K.clamp(bright / 255, 0, 1) : 0;
+    var base = ledBase(color, bright, on);
+
+    c.save();
+    if (on && glow > 0 && k > 0.02) {
+      c.shadowColor = K.alpha(color, 0.62 * k);
+      c.shadowBlur = glow * (0.3 + 0.7 * k);
+    }
+    var g = c.createRadialGradient(cx - r * 0.3, cy - r * 0.34, Math.max(1, r * 0.08), cx, cy, r);
+    g.addColorStop(0, K.shade(base, 0.12 + 0.42 * k));
+    g.addColorStop(0.48, K.shade(base, 0.02 + 0.1 * k));
+    g.addColorStop(1, K.shade(base, -0.12 - 0.2 * k));
+    c.fillStyle = g;
+    c.beginPath();
+    c.arc(cx, cy, r, 0, Math.PI * 2);
+    c.fill();
+    c.restore();
+
+    c.save();
+    c.strokeStyle = K.alpha("#000000", on ? 0.16 : 0.1);
+    c.lineWidth = 1;
+    c.beginPath();
+    c.arc(cx, cy, r, 0, Math.PI * 2);
+    c.stroke();
+    c.restore();
+
+    if (on && k > 0.02) {
+      c.save();
+      c.globalAlpha = 0.18 + 0.4 * k;
+      c.fillStyle = "#ffffff";
+      K.ellipse(c, cx - r * 0.28, cy - r * 0.33, r * 0.23, r * 0.13);
+      c.fill();
+      c.restore();
+    }
+  }
+
+  function drawScene(c, t, forceBreath) {
+    c.clearRect(0, 0, W, H);
+
+    var on = state.on;
+    var bright = state.bright;
+    if (forceBreath || state.breath) {
+      bright = breathAt(t);
+      if (forceBreath) on = true;
+    }
+
+    drawLed(c, W / 2, 88, state.size, state.color, bright, state.glow, on);
+
+    c.save();
+    c.strokeStyle = "#e7eaee";
+    c.lineWidth = 1;
+    c.beginPath();
+    c.moveTo(40, 170.5);
+    c.lineTo(W - 40, 170.5);
+    c.stroke();
+    c.restore();
+
+    K.text(c, "参考状态", 40, 182, { size: 11, color: K.theme.textFaint });
+    if (on) {
+      K.text(c, "亮度 " + Math.round(bright) + " / 255", W - 40, 182, {
+        size: 11, color: K.theme.textFaint, align: "right", mono: true
+      });
+    } else {
+      K.text(c, "已关闭", W - 40, 182, {
+        size: 11, color: K.theme.textFaint, align: "right"
+      });
+    }
+
+    drawLed(c, 78, 202, 26, state.color, 255, 7, true);
+    drawLed(c, 160, 202, 26, state.color, 153, 7, true);
+    drawLed(c, 242, 202, 26, state.color, 0, 0, false);
+
+    K.text(c, "常亮 255", 78, 228, { size: 10.5, color: K.theme.textFaint, align: "center" });
+    K.text(c, "60% · 153", 160, 228, { size: 10.5, color: K.theme.textFaint, align: "center" });
+    K.text(c, "熄灭", 242, 228, { size: 10.5, color: K.theme.textFaint, align: "center" });
+  }
+
+  K.run(function () {
+    drawScene(view.ctx, performance.now() - t0, false);
+  });
+
+  function renderCode() {
+    var L = [];
+    L.push(K.cm("/* 由页面参数实时生成 */"));
+    L.push("lv_obj_t * led = " + K.fn("lv_led_create") + "(lv_screen_active());");
+    L.push(K.fn("lv_obj_set_size") + "(led, " + K.num(state.size) + ", " + K.num(state.size) + ");");
+    L.push(K.fn("lv_obj_center") + "(led);");
+    L.push("");
+    L.push(K.fn("lv_led_set_color") + "(led, " + K.fn("lv_color_hex") + "(" + K.num(K.hexCode(state.color)) + "));");
+    if (state.on) {
+      L.push(K.fn("lv_led_set_brightness") + "(led, " + K.num(state.bright) + ");");
+      L.push(K.fn("lv_led_on") + "(led);");
+    } else {
+      L.push(K.fn("lv_led_set_brightness") + "(led, " + K.num("LV_LED_BRIGHT_MIN") + ");   " + K.cm("/* 80：最暗 */"));
+      L.push(K.fn("lv_led_off") + "(led);");
+    }
+
+    if (state.breath) {
+      L.push("");
+      L.push(K.cm("/* 呼吸：亮度 80 → 255，2400 ms 一个周期 */"));
+      L.push("static void " + K.fn("led_breath_cb") + "(void * var, int32_t v)");
+      L.push("{");
+      L.push("    " + K.fn("lv_led_set_brightness") + "((lv_obj_t *)var, (uint8_t)v);");
+      L.push("}");
+      L.push("lv_anim_t a;");
+      L.push(K.fn("lv_anim_init") + "(&a);");
+      L.push(K.fn("lv_anim_set_var") + "(&a, led);");
+      L.push(K.fn("lv_anim_set_values") + "(&a, " + K.num(80) + ", " + K.num(255) + ");");
+      L.push(K.fn("lv_anim_set_duration") + "(&a, " + K.num(1200) + ");");
+      L.push(K.fn("lv_anim_set_reverse_duration") + "(&a, " + K.num(1200) + ");");
+      L.push(K.fn("lv_anim_set_repeat_count") + "(&a, LV_ANIM_REPEAT_INFINITE);");
+      L.push(K.fn("lv_anim_set_exec_cb") + "(&a, led_breath_cb);");
+      L.push(K.fn("lv_anim_start") + "(&a);");
+    }
+    K.code(L);
+  }
+
+  function syncPower() {
+    var btns = document.getElementById("power").querySelectorAll("button");
+    Array.prototype.forEach.call(btns, function (b) {
+      b.classList.toggle("active", (b.dataset.val === "on") === state.on);
+    });
+  }
+
+  document.getElementById("color").addEventListener("input", function (e) {
+    state.color = e.target.value;
+    renderCode();
+  });
+  K.bindRange("bright", function (v) { return v; }, function (v) { state.bright = v; renderCode(); });
+  K.bindRange("size", function (v) { return v + " px"; }, function (v) { state.size = v; renderCode(); });
+  K.bindRange("glow", function (v) { return v; }, function (v) { state.glow = v; renderCode(); });
+  K.bindCheck("breath", function (on) {
+    state.breath = on;
+    renderCode();
+  });
+  K.bindSeg("power", function (v) {
+    state.on = v === "on";
+    renderCode();
+  });
+
+  view.canvas.addEventListener("pointerdown", function () {
+    state.on = !state.on;
+    syncPower();
+    renderCode();
+  });
+  view.canvas.style.cursor = "pointer";
+
+  document.getElementById("btn-png").addEventListener("click", function () {
+    K.exportPng(view.canvas, "led.png");
+  });
+
+  document.getElementById("btn-gif").addEventListener("click", function () {
+    var btn = this;
+    btn.disabled = true;
+    K.exportGif({
+      name: "led.gif", w: W, h: H, fps: 20, duration: CYCLE,
+      frame: function (c, t) {
+        drawScene(c, t, true);
+      },
+      onDone: function () { btn.disabled = false; },
+      onError: function () { btn.disabled = false; }
+    });
+  });
+
+  document.getElementById("btn-webm").addEventListener("click", function () {
+    var btn = this;
+    btn.disabled = true;
+    K.exportWebm({
+      canvas: view.canvas, name: "led.webm", duration: CYCLE,
+      before: function () {
+        var old = { on: state.on, breath: state.breath };
+        state.on = true;
+        state.breath = true;
+        syncPower();
+        return old;
+      },
+      after: function (old) {
+        state.on = old.on;
+        state.breath = old.breath;
+        syncPower();
+      },
+      onDone: function () { btn.disabled = false; },
+      onError: function () { btn.disabled = false; }
+    });
+  });
+
+  renderCode();
+  syncPower();
+})();
+</script>
+</body>
+</html>

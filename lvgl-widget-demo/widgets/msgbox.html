@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LVGL Msgbox 复刻与导出</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='4' y='7' width='24' height='18' rx='4' fill='%232b7de9'/%3E%3Cg fill='%23fff'%3E%3Crect x='8' y='11' width='16' height='2' rx='1'/%3E%3Crect x='8' y='15' width='11' height='2' rx='1'/%3E%3Crect x='17' y='20' width='7' height='2.6' rx='1.3'/%3E%3Crect x='8' y='20' width='6' height='2.6' rx='1.3'/%3E%3C/g%3E%3C/svg%3E">
+<link rel="stylesheet" href="../assets/panel.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <a class="back" href="../index.html">← 返回画廊</a>
+    <h1>LVGL Msgbox 本地复刻</h1>
+    <p>半透明遮罩 + 居中对话框，标题、正文、底部按钮与关闭按钮均可配置，参数对齐 <code>lv_msgbox_add_title()</code> / <code>lv_msgbox_add_footer_button()</code> / <code>lv_msgbox_close()</code>。</p>
+  </header>
+
+  <div class="stage">
+    <div class="stage-canvas-box"><canvas id="view"></canvas></div>
+  </div>
+
+  <section class="panel">
+    <h2>参数（对应 LVGL 接口）</h2>
+    <div class="grid">
+      <div class="field wide">
+        <label>标题 add_title</label>
+        <input type="text" id="title" value="提示" maxlength="16">
+      </div>
+      <div class="field wide">
+        <label>正文 add_text（可多行）</label>
+        <textarea id="body" rows="3" style="width:100%;border:1px solid #d6d9df;border-radius:8px;padding:8px 10px;font-family:inherit;font-size:13px;line-height:1.5;color:#1c2128;background:#fff;resize:vertical">确定要删除选中的文件吗？
+此操作不可撤销。</textarea>
+      </div>
+      <div class="field">
+        <label>按钮数量 <output id="o-count">2</output></label>
+        <input type="range" id="count" min="1" max="3" step="1" value="2">
+      </div>
+      <div class="field">
+        <label>关闭按钮 add_close_button</label>
+        <div class="check"><input type="checkbox" id="close" checked><span>标题栏右上角显示 ×</span></div>
+      </div>
+      <div class="field">
+        <label>遮罩透明度 <output id="o-mask">45%</output></label>
+        <input type="range" id="mask" min="0" max="0.8" step="0.05" value="0.45">
+      </div>
+      <div class="field">
+        <label>弹窗宽度 <output id="o-width">260 px</output></label>
+        <input type="range" id="width" min="200" max="300" step="2" value="260">
+      </div>
+      <div class="field wide">
+        <label>自动关闭演示</label>
+        <div class="check"><input type="checkbox" id="auto"><span>自动点击确定并循环重开（导出动图用）</span></div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button type="button" class="btn primary" id="btn-gif">导出 GIF</button>
+      <button type="button" class="btn" id="btn-webm">录制 WebM</button>
+      <button type="button" class="btn" id="btn-png">导出 PNG</button>
+    </div>
+    <div class="status" id="status"></div>
+  </section>
+
+  <pre class="code" id="code"></pre>
+
+  <footer>画布尺寸 320×240。GIF 编码由 gif.js（jsDelivr CDN）完成，需联网；WebM 使用浏览器原生 MediaRecorder，离线可用。点击底部按钮或右上角 × 关闭，2 秒后自动重开。</footer>
+</div>
+
+<script src="../assets/widget-kit.js"></script>
+<script>
+(function () {
+  "use strict";
+  var K = LVKit, W = 320, H = 240;
+
+  var BTN_LABELS = {
+    1: ["确定"],
+    2: ["确定", "取消"],
+    3: ["确定", "取消", "关闭"]
+  };
+
+  var state = {
+    title: "提示",
+    body: "确定要删除选中的文件吗？\n此操作不可撤销。",
+    count: 2,
+    close: true,
+    mask: 0.45,
+    width: 260,
+    auto: false,
+    open: true,
+    hint: "",
+    closedAt: 0
+  };
+
+  var view = K.view(document.getElementById("view"));
+  view.resize(W, H);
+
+  var t0 = performance.now();
+  var autoStart = 0;
+  var footerRects = [];
+  var closeRect = null;
+  var dialogRect = null;
+
+  var AUTO_CYCLE = 4200;
+
+  function sceneAt(t) {
+    var tt = ((t % AUTO_CYCLE) + AUTO_CYCLE) % AUTO_CYCLE;
+    if (tt < 1500) return { open: true, hint: "" };
+    if (tt < 3300) return { open: false, hint: "选择了 确定" };
+    return { open: true, hint: "" };
+  }
+
+  /* ---------- 背景页面 ---------- */
+  function drawBackdrop(c) {
+    c.fillStyle = "#ffffff";
+    c.fillRect(0, 0, W, H);
+    K.text(c, "设置", 16, 22, { size: 16, weight: 600, color: K.theme.text });
+
+    var rows = [
+      ["wifi", "无线局域网"],
+      ["bell", "通知"],
+      ["gear", "通用"]
+    ];
+    for (var i = 0; i < rows.length; i++) {
+      var ry = 44 + i * 44;
+      K.icon(c, rows[i][0], 16, ry + 13, 18, K.theme.textMuted);
+      K.text(c, rows[i][1], 42, ry + 22, { size: 14, color: K.theme.text });
+      K.text(c, "›", W - 20, ry + 21, { size: 17, color: "#b8bfc9", align: "center" });
+      c.fillStyle = "#eef0f3";
+      c.fillRect(14, ry + 43, W - 28, 1);
+    }
+
+    var ly = 44 + 3 * 44;
+    K.icon(c, "wifi", 16, ly + 13, 18, K.theme.textMuted);
+    K.text(c, "飞行模式", 42, ly + 22, { size: 14, color: K.theme.text });
+    K.box(c, W - 54, ly + 11, 36, 20, { bg: "#e3e6ea", radius: 10 });
+    K.box(c, W - 36, ly + 13, 16, 16, { bg: "#ffffff", radius: 8, borderWidth: 1, border: "#cfd4db" });
+  }
+
+  /* ---------- 对话框 ---------- */
+  function drawDialog(c) {
+    var dw = state.width;
+    var lines = [];
+    String(state.body).split("\n").forEach(function (p) {
+      lines = lines.concat(K.wrap(c, p, dw - 40, { size: 13 }));
+    });
+    if (lines.length > 5) lines = lines.slice(0, 5);
+
+    var bodyH = Math.max(34, lines.length * 19 + 6);
+    var dh = 44 + bodyH + 52;
+    var dx = (W - dw) / 2;
+    var dy = Math.max(10, Math.round((H - dh) / 2));
+
+    dialogRect = { x: dx, y: dy, w: dw, h: dh };
+    footerRects = [];
+    closeRect = null;
+
+    K.box(c, dx, dy, dw, dh, {
+      bg: "#ffffff", radius: 14, borderWidth: 1, border: "#e2e6eb",
+      shadow: K.alpha("#0b1220", 0.3), shadowBlur: 22, shadowY: 8
+    });
+
+    K.text(c, state.title || "提示", dx + 18, dy + 23, {
+      size: 15, weight: 600, color: K.theme.text
+    });
+
+    if (state.close) {
+      closeRect = { x: dx + dw - 36, y: dy + 11, w: 24, h: 24 };
+      K.box(c, closeRect.x, closeRect.y, 24, 24, { bg: "#f2f4f7", radius: 12 });
+      c.save();
+      c.strokeStyle = K.theme.textMuted;
+      c.lineWidth = 1.6;
+      c.lineCap = "round";
+      c.beginPath();
+      c.moveTo(dx + dw - 29, dy + 18);
+      c.lineTo(dx + dw - 19, dy + 28);
+      c.moveTo(dx + dw - 19, dy + 18);
+      c.lineTo(dx + dw - 29, dy + 28);
+      c.stroke();
+      c.restore();
+    }
+
+    c.fillStyle = "#eceff3";
+    c.fillRect(dx + 1, dy + 43, dw - 2, 1);
+
+    for (var i = 0; i < lines.length; i++) {
+      K.text(c, lines[i], dx + 20, dy + 56 + i * 19, { size: 13, color: K.theme.textMuted });
+    }
+
+    c.fillStyle = "#eceff3";
+    c.fillRect(dx + 1, dy + dh - 52, dw - 2, 1);
+
+    var labels = BTN_LABELS[state.count];
+    var gap = 8;
+    var bx0 = dx + 18;
+    var by = dy + dh - 41;
+    var total = dw - 36;
+    var bw = (total - gap * (labels.length - 1)) / labels.length;
+
+    for (var j = 0; j < labels.length; j++) {
+      var bx = bx0 + j * (bw + gap);
+      var primary = (j === 0);
+      K.box(c, bx, by, bw, 29, {
+        bg: primary ? K.theme.primary : "#ffffff",
+        radius: 8, borderWidth: 1,
+        border: primary ? K.theme.primary : K.theme.border
+      });
+      K.text(c, labels[j], bx + bw / 2, by + 15, {
+        size: 12.5, weight: primary ? 600 : 500,
+        color: primary ? "#ffffff" : K.theme.text, align: "center"
+      });
+      footerRects.push({ x: bx, y: by, w: bw, h: 29, label: labels[j] });
+    }
+  }
+
+  function drawHint(c, hint) {
+    var tw = K.measure(c, hint, { size: 12 }) + 28;
+    var x = (W - tw) / 2;
+    var y = H - 34;
+    K.box(c, x, y, tw, 24, {
+      bg: "rgba(28,33,40,0.92)", radius: 12,
+      shadow: K.alpha("#000000", 0.2), shadowBlur: 8, shadowY: 2
+    });
+    K.text(c, hint, W / 2, y + 12, { size: 12, color: "#ffffff", align: "center" });
+  }
+
+  /* ---------- 场景 ---------- */
+  function drawScene(c, t, forceAuto) {
+    var autoOn = forceAuto || state.auto;
+    var open = state.open;
+    var hint = state.hint;
+
+    if (autoOn) {
+      var s = sceneAt(t);
+      open = s.open;
+      hint = s.hint;
+    }
+
+    c.clearRect(0, 0, W, H);
+    drawBackdrop(c);
+
+    c.fillStyle = "rgba(0,0,0," + state.mask + ")";
+    c.fillRect(0, 0, W, H);
+
+    footerRects = [];
+    closeRect = null;
+    dialogRect = null;
+
+    if (open) {
+      drawDialog(c);
+    } else if (hint) {
+      drawHint(c, hint);
+    }
+  }
+
+  K.run(function (now) {
+    if (!state.auto && !state.open && now - state.closedAt > 2000) {
+      state.open = true;
+      state.hint = "";
+    }
+    var t = state.auto ? now - autoStart : now - t0;
+    drawScene(view.ctx, t, false);
+  });
+
+  /* ---------- 交互 ---------- */
+  function posOf(e) {
+    var r = view.canvas.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  }
+
+  function inside(p, r) {
+    return p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h;
+  }
+
+  function stopAuto() {
+    if (state.auto) {
+      state.auto = false;
+      document.getElementById("auto").checked = false;
+    }
+  }
+
+  function closeBox(msg) {
+    state.open = false;
+    state.hint = msg;
+    state.closedAt = performance.now();
+    stopAuto();
+  }
+
+  view.canvas.addEventListener("pointerdown", function (e) {
+    var p = posOf(e);
+
+    if (!state.open) {
+      state.open = true;
+      state.hint = "";
+      stopAuto();
+      return;
+    }
+
+    if (closeRect && inside(p, closeRect)) {
+      closeBox("已关闭");
+      return;
+    }
+    for (var i = 0; i < footerRects.length; i++) {
+      if (inside(p, footerRects[i])) {
+        closeBox("选择了 " + footerRects[i].label);
+        return;
+      }
+    }
+    if (dialogRect && !inside(p, dialogRect)) {
+      closeBox("点击遮罩关闭");
+    }
+  });
+
+  /* ---------- 参数 ---------- */
+  document.getElementById("title").addEventListener("input", function (e) {
+    state.title = e.target.value;
+    renderCode();
+  });
+
+  document.getElementById("body").addEventListener("input", function (e) {
+    state.body = e.target.value;
+    renderCode();
+  });
+
+  K.bindRange("count", null, function (v) { state.count = v; renderCode(); });
+  K.bindCheck("close", function (on) { state.close = on; renderCode(); });
+  K.bindRange("mask", function (v) { return Math.round(v * 100) + "%"; }, function (v) {
+    state.mask = v;
+    renderCode();
+  });
+  K.bindRange("width", function (v) { return v + " px"; }, function (v) {
+    state.width = v;
+    renderCode();
+  });
+  K.bindCheck("auto", function (on) {
+    state.auto = on;
+    autoStart = performance.now();
+    state.open = true;
+    state.hint = "";
+    renderCode();
+  });
+
+  /* ---------- C 代码 ---------- */
+  function renderCode() {
+    var labels = BTN_LABELS[state.count];
+    var L = [];
+    L.push(K.cm("/* 由页面参数实时生成 */"));
+    L.push("lv_obj_t * mbox = " + K.fn("lv_msgbox_create") + "(lv_screen_active());");
+    L.push(K.fn("lv_msgbox_add_title") + "(mbox, " + JSON.stringify(state.title || "") + ");");
+    L.push(K.fn("lv_msgbox_add_text") + "(mbox, " + JSON.stringify(state.body) + ");");
+    for (var i = 0; i < labels.length; i++) {
+      L.push("lv_obj_t * btn_" + i + " = " + K.fn("lv_msgbox_add_footer_button") + "(mbox, " + JSON.stringify(labels[i]) + ");");
+    }
+    if (state.close) {
+      L.push("lv_obj_t * btn_close = " + K.fn("lv_msgbox_add_close_button") + "(mbox);");
+    }
+    L.push(K.fn("lv_obj_set_width") + "(mbox, " + K.num(state.width) + ");");
+    L.push(K.fn("lv_obj_set_style_bg_opa") + "(lv_layer_top(), " + K.num(Math.round(state.mask * 255)) + ", " + K.num(0) + ");" +
+      K.cm("  /* 遮罩 " + Math.round(state.mask * 100) + "% */"));
+    L.push("");
+    L.push(K.fn("lv_obj_add_event_cb") + "(btn_0, msgbox_event_cb, LV_EVENT_CLICKED, mbox);");
+    L.push("");
+    L.push("static void msgbox_event_cb(lv_event_t * e)");
+    L.push("{");
+    L.push("    lv_obj_t * mbox = " + K.fn("lv_event_get_user_data") + "(e);");
+    L.push("    " + K.fn("lv_msgbox_close") + "(mbox);");
+    L.push("}");
+    K.code(L);
+  }
+
+  /* ---------- 导出 ---------- */
+  document.getElementById("btn-png").addEventListener("click", function () {
+    K.exportPng(view.canvas, "msgbox.png");
+  });
+
+  document.getElementById("btn-gif").addEventListener("click", function () {
+    var btn = this;
+    btn.disabled = true;
+    K.exportGif({
+      name: "msgbox.gif", w: W, h: H, fps: 16, duration: AUTO_CYCLE,
+      frame: function (c, t) { drawScene(c, t, true); },
+      onDone: function () { btn.disabled = false; },
+      onError: function () { btn.disabled = false; }
+    });
+  });
+
+  document.getElementById("btn-webm").addEventListener("click", function () {
+    var btn = this;
+    btn.disabled = true;
+    K.exportWebm({
+      canvas: view.canvas, name: "msgbox.webm", duration: AUTO_CYCLE,
+      before: function () {
+        var old = state.auto;
+        state.auto = true;
+        autoStart = performance.now();
+        document.getElementById("auto").checked = true;
+        state.open = true;
+        state.hint = "";
+        return old;
+      },
+      after: function (old) {
+        state.auto = old;
+        document.getElementById("auto").checked = old;
+        state.open = true;
+        state.hint = "";
+      },
+      onDone: function () { btn.disabled = false; },
+      onError: function () { btn.disabled = false; }
+    });
+  });
+
+  renderCode();
+})();
+</script>
+</body>
+</html>

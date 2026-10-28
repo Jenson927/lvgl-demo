@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LVGL Checkbox 复刻与导出</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='4' y='4' width='24' height='24' rx='6' fill='%232b7de9'/%3E%3Cpath d='M10 16l4 4 8-9' fill='none' stroke='%23fff' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="../assets/panel.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <a class="back" href="../index.html">← 返回画廊</a>
+    <h1>LVGL Checkbox 本地复刻</h1>
+    <p>勾选框 + 文本、选中 / 未选中 / 禁用三种状态，参数对齐 <code>lv_checkbox_set_text()</code> / <code>LV_STATE_CHECKED</code>，点击画布可切换。</p>
+  </header>
+
+  <div class="stage">
+    <div class="stage-canvas-box"><canvas id="view"></canvas></div>
+  </div>
+
+  <section class="panel">
+    <h2>参数（对应 LVGL 接口）</h2>
+    <div class="grid">
+      <div class="field wide">
+        <label>文本 set_text</label>
+        <input type="text" id="text" value="记住密码" maxlength="14">
+      </div>
+      <div class="field">
+        <label>选中状态 LV_STATE_CHECKED</label>
+        <div class="seg" id="checked">
+          <button type="button" data-val="off" class="active">未选中</button>
+          <button type="button" data-val="on">已选中</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>禁用 LV_STATE_DISABLED</label>
+        <div class="seg" id="disabled">
+          <button type="button" data-val="off" class="active">否</button>
+          <button type="button" data-val="on">是</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>勾选颜色 INDICATOR</label>
+        <input type="color" id="color" value="#2b7de9">
+      </div>
+      <div class="field">
+        <label>动画时长 anim_duration <output id="o-dur">200 ms</output></label>
+        <input type="range" id="dur" min="0" max="1000" step="20" value="200">
+      </div>
+      <div class="field">
+        <label>自动演示</label>
+        <div class="check"><input type="checkbox" id="auto"><span>勾选 / 取消循环（导出 GIF 用）</span></div>
+      </div>
+      <div class="field">
+        <label>示意图</label>
+        <div class="check"><span style="font-size:12px">下方两行固定展示已选中与禁用态</span></div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button type="button" class="btn primary" id="btn-gif">导出 GIF</button>
+      <button type="button" class="btn" id="btn-webm">录制 WebM</button>
+      <button type="button" class="btn" id="btn-png">导出 PNG</button>
+    </div>
+    <div class="status" id="status"></div>
+  </section>
+
+  <pre class="code" id="code"></pre>
+
+  <footer>画布尺寸 320×240。GIF 编码由 gif.js（jsDelivr CDN）完成，需联网；WebM 使用浏览器原生 MediaRecorder，离线可用。</footer>
+</div>
+
+<script src="../assets/widget-kit.js"></script>
+<script>
+(function () {
+  "use strict";
+  var K = LVKit, W = 320, H = 240;
+
+  var state = {
+    text: "记住密码",
+    checked: false,
+    disabled: false,
+    color: "#2b7de9",
+    dur: 200,
+    auto: false
+  };
+
+  var view = K.view(document.getElementById("view"));
+  view.resize(W, H);
+  var t0 = performance.now();
+  var anim = { from: 0, to: 0, start: performance.now() };
+
+  function autoAt(t) {
+    var CYCLE = 1800, ANIM = 600;
+    var seg = Math.floor(t / CYCLE) % 2;
+    var k = K.clamp((t % CYCLE) / ANIM, 0, 1);
+    var from = seg === 0 ? 0 : 1, to = 1 - from;
+    return from + (to - from) * K.ease(k);
+  }
+
+  function currentP() {
+    if (state.auto) return autoAt(performance.now() - t0);
+    var k = K.clamp((performance.now() - anim.start) / Math.max(1, state.dur), 0, 1);
+    return anim.from + (anim.to - anim.from) * K.ease(k);
+  }
+
+  function drawRow(c, y, label, p, disabled) {
+    var s = 28, gap = 12;
+    var tw = K.measure(c, label, { size: 15 });
+    var x = (W - (s + gap + tw)) / 2;
+    var top = y - s / 2;
+
+    c.save();
+    if (disabled) c.globalAlpha = 0.42;
+
+    var fill = p > 0.001 ? K.mix("#ffffff", state.color, p) : "#ffffff";
+    var border = p > 0.001 ? K.mix("#b8bfc9", state.color, p) : "#b8bfc9";
+
+    K.box(c, x, top, s, s, { bg: fill, radius: 6, borderWidth: 2, border: border });
+
+    if (p > 0.001) {
+      c.save();
+      K.roundRectPath(c, x + 2, top + 2, s - 4, s - 4, 5);
+      c.clip();
+      c.globalAlpha *= p;
+      var isz = 16 * (0.55 + 0.45 * p);
+      K.icon(c, "check", x + s / 2 - isz / 2, top + s / 2 - isz / 2, isz, "#ffffff");
+      c.restore();
+    }
+
+    K.text(c, label, x + s + gap, y + 1, {
+      size: 15,
+      color: disabled ? K.theme.textFaint : K.theme.text
+    });
+    c.restore();
+  }
+
+  function draw(c) {
+    c.clearRect(0, 0, W, H);
+    var p = currentP();
+
+    drawRow(c, 70, state.text || " ", p, state.disabled);
+    drawRow(c, 122, "已选中 (LV_STATE_CHECKED)", 1, false);
+    drawRow(c, 174, "禁用 (LV_STATE_DISABLED)", 1, true);
+
+    c.globalAlpha = 0.35;
+    K.text(c, "点击第一行可切换", W / 2, H - 22, { size: 11.5, color: K.theme.textFaint, align: "center" });
+    c.globalAlpha = 1;
+  }
+
+  K.run(function () {
+    draw(view.ctx);
+    if (state.auto) {
+      var on = autoAt(performance.now() - t0) > 0.5;
+      if (on !== state.checked) {
+        state.checked = on;
+        syncSeg();
+        renderCode();
+      }
+    }
+  });
+
+  function syncSeg() {
+    var btns = document.getElementById("checked").querySelectorAll("button");
+    Array.prototype.forEach.call(btns, function (b) {
+      b.classList.toggle("active", (b.dataset.val === "on") === state.checked);
+    });
+  }
+
+  function setChecked(on, animate) {
+    var p = currentP();
+    state.checked = !!on;
+    anim.from = animate ? p : (on ? 1 : 0);
+    anim.to = on ? 1 : 0;
+    anim.start = performance.now();
+    syncSeg();
+    renderCode();
+  }
+
+  function renderCode() {
+    var L = [];
+    L.push(K.cm("/* 由页面参数实时生成 */"));
+    L.push("lv_obj_t * cb = " + K.fn("lv_checkbox_create") + "(lv_screen_active());");
+    L.push(K.fn("lv_checkbox_set_text") + "(cb, " + JSON.stringify(state.text || "") + ");");
+    if (state.checked) L.push(K.fn("lv_obj_add_state") + "(cb, " + K.num("LV_STATE_CHECKED") + ");");
+    if (state.disabled) L.push(K.fn("lv_obj_add_state") + "(cb, " + K.num("LV_STATE_DISABLED") + ");");
+    L.push(K.fn("lv_obj_set_style_bg_color") + "(cb, " + K.fn("lv_color_hex") + "(" + K.num(K.hexCode(state.color)) + "), LV_PART_INDICATOR | LV_STATE_CHECKED);");
+    L.push(K.fn("lv_obj_set_style_bg_opa") + "(cb, LV_OPA_COVER, LV_PART_INDICATOR | LV_STATE_CHECKED);");
+    L.push(K.fn("lv_obj_set_style_text_color") + "(cb, " + K.fn("lv_color_hex") + "(" + K.num("0x1c2128") + "), LV_PART_MAIN);");
+    L.push(K.fn("lv_obj_set_style_anim_duration") + "(cb, " + K.num(state.dur) + ", 0);");
+    L.push(K.fn("lv_obj_center") + "(cb);");
+    K.code(L);
+  }
+
+  /* ---------- 控件 ---------- */
+  document.getElementById("text").addEventListener("input", function (e) {
+    state.text = e.target.value;
+    renderCode();
+  });
+  K.bindSeg("checked", function (v) {
+    state.auto = false;
+    document.getElementById("auto").checked = false;
+    setChecked(v === "on", true);
+  });
+  K.bindSeg("disabled", function (v) {
+    state.disabled = v === "on";
+    renderCode();
+  });
+  document.getElementById("color").addEventListener("input", function (e) {
+    state.color = e.target.value;
+    renderCode();
+  });
+  K.bindRange("dur", function (v) { return v + " ms"; }, function (v) { state.dur = v; renderCode(); });
+  K.bindCheck("auto", function (on) { state.auto = on; });
+
+  view.canvas.addEventListener("pointerdown", function () {
+    if (state.disabled) return;
+    state.auto = false;
+    document.getElementById("auto").checked = false;
+    setChecked(!state.checked, true);
+  });
+
+  /* ---------- 导出 ---------- */
+  document.getElementById("btn-png").addEventListener("click", function () {
+    K.exportPng(view.canvas, "checkbox.png");
+  });
+  document.getElementById("btn-gif").addEventListener("click", function () {
+    var btn = this;
+    btn.disabled = true;
+    K.exportGif({
+      name: "checkbox.gif", w: W, h: H, fps: 20, duration: 1800,
+      frame: function (c, t) {
+        var p = autoAt(t);
+        c.clearRect(0, 0, W, H);
+        drawRow(c, 70, state.text || " ", p, state.disabled);
+        drawRow(c, 122, "已选中 (LV_STATE_CHECKED)", 1, false);
+        drawRow(c, 174, "禁用 (LV_STATE_DISABLED)", 1, true);
+        c.globalAlpha = 0.35;
+        K.text(c, "点击第一行可切换", W / 2, H - 22, { size: 11.5, color: K.theme.textFaint, align: "center" });
+        c.globalAlpha = 1;
+      },
+      onDone: function () { btn.disabled = false; },
+      onError: function () { btn.disabled = false; }
+    });
+  });
+  document.getElementById("btn-webm").addEventListener("click", function () {
+    var btn = this;
+    btn.disabled = true;
+    K.exportWebm({
+      canvas: view.canvas, name: "checkbox.webm", duration: 1800,
+      before: function () { var old = state.auto; state.auto = true; return old; },
+      after: function (old) { state.auto = old; },
+      onDone: function () { btn.disabled = false; },
+      onError: function () { btn.disabled = false; }
+    });
+  });
+
+  renderCode();
+  syncSeg();
+})();
+</script>
+</body>
+</html>

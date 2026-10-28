@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LVGL Roller 复刻与导出</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='9' y='4' width='14' height='24' rx='4' fill='none' stroke='%232b7de9' stroke-width='2'/%3E%3Cpath d='M13 11h6M13 16h6M13 21h6' stroke='%232b7de9' stroke-width='1.8' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="../assets/panel.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <a class="back" href="../index.html">← 返回画廊</a>
+    <h1>LVGL Roller 本地复刻</h1>
+    <p>5 行可见滚轮：中间行最大最清晰，上下行按距离缩小变淡，可上下拖动并带吸附动画；参数对齐 <code>lv_roller_set_options()</code> / <code>lv_roller_set_visible_row_count()</code> / <code>lv_roller_set_selected()</code>。</p>
+  </header>
+
+  <div class="stage">
+    <div class="stage-canvas-box"><canvas id="view"></canvas></div>
+  </div>
+
+  <section class="panel">
+    <h2>参数（对应 LVGL 接口）</h2>
+    <div class="grid">
+      <div class="field wide">
+        <label>选项 set_options（逗号 / 换行分隔）</label>
+        <input type="text" id="options" maxlength="160" value="北京, 上海, 广州, 深圳, 杭州, 成都, 重庆, 武汉">
+      </div>
+
+      <div class="field">
+        <label>可见行数 set_visible_row_count</label>
+        <div class="seg" id="rows">
+          <button type="button" data-val="3">3</button>
+          <button type="button" data-val="5" class="active">5</button>
+          <button type="button" data-val="7">7</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>无限循环 mode</label>
+        <div class="check"><input type="checkbox" id="infinite" checked><span>LV_ROLLER_MODE_INFINITE</span></div>
+      </div>
+
+      <div class="field">
+        <label>选中索引 set_selected <output id="o-sel">上海 (1)</output></label>
+        <input type="range" id="sel" min="0" max="7" step="1" value="1">
+      </div>
+      <div class="field">
+        <label>动画时长 anim_duration <output id="o-anim">400 ms</output></label>
+        <input type="range" id="anim" min="100" max="1000" step="50" value="400">
+      </div>
+
+      <div class="field">
+        <label>自动滚动演示</label>
+        <div class="check"><input type="checkbox" id="auto" checked><span>按动画时长逐项滚动（GIF 用）</span></div>
+      </div>
+      <div class="field">
+        <label>当前选中</label>
+        <div class="check"><span style="font-size:12px" id="o-info">第 2 项 / 共 8 项</span></div>
+      </div>
+
+      <div class="field wide">
+        <label>提示</label>
+        <div class="check"><span style="font-size:12px">在滚轮上按住上下拖动，松开后吸附到最近一项；直接点击某一行也可选中。</span></div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button type="button" class="btn primary" id="btn-gif">导出 GIF</button>
+      <button type="button" class="btn" id="btn-webm">录制 WebM</button>
+      <button type="button" class="btn" id="btn-png">导出 PNG</button>
+    </div>
+    <div class="status" id="status"></div>
+  </section>
+
+  <pre class="code" id="code"></pre>
+
+  <footer>画布尺寸 320×240 · GIF 编码由 gif.js（jsDelivr CDN）完成，需联网；WebM 使用浏览器原生 MediaRecorder，离线可用。</footer>
+</div>
+
+<script src="../assets/widget-kit.js"></script>
+<script>(function () {
+  "use strict";
+  var K = LVKit, W = 320, H = 240;
+  var D = 1000; /* 自动滚动时每项停留间隔 */
+
+  var state = {
+    options: ["北京", "上海", "广州", "深圳", "杭州", "成都", "重庆", "武汉"],
+    rows: 5,
+    selected: 1,
+    infinite: true,
+    anim: 400,
+    auto: true,
+    pos: 1,
+    lastPos: 1,
+    autoT0: 0,
+    tween: { active: false, from: 0, to: 0, start: 0, dur: 0 },
+    drag: { active: false, startY: 0, startPos: 0, moved: false }
+  };
+
+  var view = K.view(document.getElementById("view"));
+  view.resize(W, H);
+  view.canvas.style.cursor = "grab";
+  state.autoT0 = performance.now() - state.selected * D;
+
+  function parseOptions(s) {
+    var parts = s.split(/[\n,，、]/);
+    var out = [], i, v;
+    for (i = 0; i < parts.length; i++) {
+      v = parts[i].replace(/^\s+|\s+$/g, "");
+      if (v) out.push(v);
+    }
+    if (!out.length) out.push("选项一");
+    return out;
+  }
+
+  function clampIndex(j) {
+    var n = state.options.length;
+    if (n === 0) return 0;
+    if (!state.infinite) return K.clamp(j, 0, n - 1);
+    return ((j % n) + n) % n;
+  }
+
+  function metrics() {
+    var rowH = Math.min(46, (H - 24) / state.rows);
+    var cardW = 208;
+    var cardH = rowH * state.rows;
+    return {
+      rowH: rowH, cardW: cardW, cardH: cardH,
+      cardX: (W - cardW) / 2,
+      cardY: (H - cardH) / 2
+    };
+  }
+
+  function fitText(c, s, maxW, size) {
+    s = String(s);
+    if (K.measure(c, s, { size: size }) <= maxW) return s;
+    var out = s;
+    while (out.length && K.measure(c, out + "…", { size: size }) > maxW) out = out.slice(0, -1);
+    return out + "…";
+  }
+
+  /* 自动演示：给定时刻 t 的连续滚动位置（可独立渲染任意一帧） */
+  function autoPos(t) {
+    var n = state.options.length;
+    if (n <= 1) return 0;
+    var A = Math.max(120, Math.min(state.anim, 900));
+
+    if (state.infinite) {
+      var u = (t % (D * n)) / D;
+      var i = Math.floor(u);
+      var f = u - i;
+      return i + K.easeOut(K.clamp(f * D / A, 0, 1));
+    }
+
+    var span = 2 * (n - 1);
+    var u2 = (t % (D * span)) / D;
+    var v = u2 <= n - 1 ? u2 : 2 * (n - 1) - u2;
+    var i2 = Math.floor(v);
+    var f2 = v - i2;
+    return i2 + K.easeOut(K.clamp(f2 * D / A, 0, 1));
+  }
+
+  function livePos(now) {
+    if (state.auto) {
+      state.pos = autoPos(now - state.autoT0);
+      return state.pos;
+    }
+    if (state.tween.active) {
+      var k = K.clamp((now - state.tween.start) / state.tween.dur, 0, 1);
+      state.pos = state.tween.from + (state.tween.to - state.tween.from) * K.easeOut(k);
+      if (k >= 1) {
+        state.pos = state.tween.to;
+        state.tween.active = false;
+      }
+      return state.pos;
+    }
+    return state.pos;
+  }
+
+  function drawScene(c, pos) {
+    var n = state.options.length;
+    var m = metrics();
+    var centerY = m.cardY + m.cardH / 2;
+
+    c.clearRect(0, 0, W, H);
+
+    K.box(c, m.cardX, m.cardY, m.cardW, m.cardH, {
+      bg: "#ffffff", radius: 12,
+      shadow: K.alpha("#1c2128", 0.10), shadowBlur: 14, shadowY: 4
+    });
+
+    K.box(c, m.cardX + 12, centerY - m.rowH / 2 + 4, m.cardW - 24, m.rowH - 8, {
+      bg: "#eaf2fe", radius: 8
+    });
+
+    c.save();
+    K.roundRectPath(c, m.cardX, m.cardY, m.cardW, m.cardH, 12);
+    c.clip();
+
+    var base = Math.round(pos);
+    var drawInfinite = state.infinite && n > 1;
+    var j, off, y, idx, opt, d, size, alpha, isSel;
+
+    for (j = base - m.rows - 1; j <= base + m.rows + 1; j++) {
+      if (!drawInfinite && (j < 0 || j >= n)) continue;
+      off = j - pos;
+      if (Math.abs(off) > m.rows * 0.9) continue;
+      y = centerY + off * m.rowH;
+      if (y < m.cardY - m.rowH * 0.5 || y > m.cardY + m.cardH + m.rowH * 0.5) continue;
+      idx = drawInfinite ? clampIndex(j) : j;
+      opt = state.options[idx] || "";
+      d = Math.abs(off);
+      size = Math.max(12, 21 - 3.6 * Math.min(d, 3));
+      alpha = K.clamp(1 - 0.24 * d, 0.2, 1);
+      isSel = d < 0.45;
+
+      K.text(c, fitText(c, opt, m.cardW - 36, size), m.cardX + m.cardW / 2, y, {
+        size: size,
+        weight: isSel ? 600 : 500,
+        color: isSel ? K.theme.text : K.theme.textMuted,
+        alpha: alpha,
+        align: "center"
+      });
+    }
+
+    c.restore();
+
+    K.box(c, m.cardX, m.cardY, m.cardW, m.cardH, {
+      radius: 12, borderWidth: 1, border: "#dfe3e8"
+    });
+  }
+
+  K.run(function () {
+    var now = performance.now();
+    var pos = livePos(now);
+    state.lastPos = pos;
+    drawScene(view.ctx, pos);
+
+    if (state.auto) {
+      var idx = clampIndex(Math.round(pos));
+      if (idx !== state.selected) {
+        state.selected = idx;
+        syncSelectedUI();
+        renderCode();
+      }
+    }
+  });
+
+  function syncSelectedUI() {
+    var n = state.options.length;
+    var name = state.options[state.selected] || "";
+    document.getElementById("o-sel").textContent = name + " (" + state.selected + ")";
+    var el = document.getElementById("sel");
+    el.max = Math.max(0, n - 1);
+    el.value = state.selected;
+    document.getElementById("o-info").textContent =
+      "第 " + (state.selected + 1) + " 项 / 共 " + n + " 项";
+  }
+
+  function snapTo(target) {
+    var n = state.options.length;
+    if (!state.infinite) target = K.clamp(target, 0, n - 1);
+    state.tween = {
+      active: true,
+      from: state.pos,
+      to: target,
+      start: performance.now(),
+      dur: Math.max(100, state.anim)
+    };
+    state.selected = clampIndex(Math.round(target));
+    syncSelectedUI();
+    renderCode();
+  }
+
+  /* ---------- 拖动 / 点击 ---------- */
+  function pointerPos(e) {
+    var rect = view.canvas.getBoundingClientRect();
+    return {
+      x: (e.clientX - rect.left) * (W / rect.width),
+      y: (e.clientY - rect.top) * (H / rect.height)
+    };
+  }
+
+  function inCard(p) {
+    var m = metrics();
+    return p.x >= m.cardX && p.x <= m.cardX + m.cardW &&
+      p.y >= m.cardY && p.y <= m.cardY + m.cardH;
+  }
+
+  function endDrag(e) {
+    if (!state.drag.active) return;
+    state.drag.active = false;
+    view.canvas.style.cursor = "grab";
+    var p = e && e.clientY != null ? pointerPos(e) : null;
+    var m = metrics();
+    if (!state.drag.moved && p && inCard(p)) {
+      var target = Math.round(state.pos + (p.y - (m.cardY + m.cardH / 2)) / m.rowH);
+      snapTo(target);
+    } else {
+      snapTo(Math.round(state.pos));
+    }
+    K.status("已吸附到：" + state.options[state.selected] + "（第 " + (state.selected + 1) + " 项）");
+  }
+
+  view.canvas.addEventListener("pointerdown", function (e) {
+    var p = pointerPos(e);
+    if (!inCard(p)) return;
+    state.drag.active = true;
+    state.drag.startY = p.y;
+    state.drag.startPos = livePos(performance.now());
+    state.drag.moved = false;
+    state.auto = false;
+    document.getElementById("auto").checked = false;
+    state.tween.active = false;
+    view.canvas.style.cursor = "grabbing";
+    if (view.canvas.setPointerCapture) {
+      try { view.canvas.setPointerCapture(e.pointerId); } catch (err) { }
+    }
+  });
+
+  view.canvas.addEventListener("pointermove", function (e) {
+    if (!state.drag.active) return;
+    var p = pointerPos(e);
+    var m = metrics();
+    var dy = state.drag.startY - p.y;
+    if (Math.abs(dy) > 4) state.drag.moved = true;
+    var np = state.drag.startPos + dy / m.rowH;
+    if (!state.infinite) np = K.clamp(np, 0, state.options.length - 1);
+    state.pos = np;
+    var idx = clampIndex(Math.round(np));
+    if (idx !== state.selected) {
+      state.selected = idx;
+      syncSelectedUI();
+      renderCode();
+    }
+  });
+
+  view.canvas.addEventListener("pointerup", endDrag);
+  view.canvas.addEventListener("pointercancel", endDrag);
+
+  /* ---------- 参数 ---------- */
+  document.getElementById("options").addEventListener("input", function (e) {
+    state.options = parseOptions(e.target.value);
+    state.selected = K.clamp(state.selected, 0, state.options.length - 1);
+    state.pos = state.selected;
+    state.tween.active = false;
+    syncSelectedUI();
+    renderCode();
+  });
+
+  document.getElementById("sel").addEventListener("input", function (e) {
+    state.auto = false;
+    document.getElementById("auto").checked = false;
+    state.tween.active = false;
+    state.selected = Number(e.target.value);
+    state.pos = state.selected;
+    syncSelectedUI();
+    renderCode();
+  });
+
+  K.bindSeg("rows", function (v) {
+    state.rows = Number(v);
+    renderCode();
+  });
+  K.bindCheck("infinite", function (on) {
+    state.infinite = on;
+    state.selected = clampIndex(state.selected);
+    if (!on) state.pos = K.clamp(state.pos, 0, state.options.length - 1);
+    syncSelectedUI();
+    renderCode();
+  });
+  K.bindRange("anim", function (v) { return v + " ms"; }, function (v) {
+    state.anim = v;
+    renderCode();
+  });
+  K.bindCheck("auto", function (on) {
+    state.auto = on;
+    if (on) {
+      state.autoT0 = performance.now() - state.selected * D;
+      state.tween.active = false;
+    } else {
+      snapTo(Math.round(state.lastPos));
+    }
+  });
+
+  /* ---------- C 代码 ---------- */
+  function cstr(s) {
+    return '"' + String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n") + '"';
+  }
+
+  function renderCode() {
+    var n = state.options.length;
+    var m = metrics();
+    var mode = state.infinite ? "LV_ROLLER_MODE_INFINITE" : "LV_ROLLER_MODE_NORMAL";
+    var L = [];
+    L.push(K.cm("/* 由页面参数实时生成 */"));
+    L.push("lv_obj_t * roller = " + K.fn("lv_roller_create") + "(lv_screen_active());");
+    L.push(K.fn("lv_obj_set_size") + "(roller, " + K.num(m.cardW) + ", " + K.num(Math.round(m.cardH)) + ");");
+    L.push(K.fn("lv_obj_center") + "(roller);");
+    L.push(K.fn("lv_roller_set_options") + "(roller, " + cstr(state.options.join("\n")) + ", " + K.num(mode) + ");");
+    L.push(K.fn("lv_roller_set_visible_row_count") + "(roller, " + K.num(state.rows) + ");");
+    L.push(K.fn("lv_roller_set_selected") + "(roller, " + K.num(state.selected) + ", " + K.num("LV_ANIM_ON") + ");");
+    L.push(K.fn("lv_obj_set_style_anim_duration") + "(roller, " + K.num(state.anim) + ", 0);");
+    L.push(K.cm("/* 选项数量：" + n + "，当前显示第 " + (state.selected + 1) + " 项 */"));
+    K.code(L);
+  }
+
+  /* ---------- 导出 ---------- */
+  function cycleMs() {
+    var n = state.options.length;
+    if (n <= 1) return 1200;
+    return D * (state.infinite ? n : 2 * (n - 1));
+  }
+
+  function withButtons(fn) {
+    var ids = ["btn-gif", "btn-webm", "btn-png"];
+    ids.forEach(function (id) { document.getElementById(id).disabled = true; });
+    fn(function () {
+      ids.forEach(function (id) { document.getElementById(id).disabled = false; });
+    });
+  }
+
+  document.getElementById("btn-gif").addEventListener("click", function () {
+    withButtons(function (done) {
+      K.exportGif({
+        name: "roller.gif", w: W, h: H, fps: 16, duration: cycleMs(),
+        frame: function (c, t) {
+          drawScene(c, autoPos(t));
+        },
+        onDone: done,
+        onError: done
+      });
+    });
+  });
+
+  document.getElementById("btn-webm").addEventListener("click", function () {
+    withButtons(function (done) {
+      K.exportWebm({
+        canvas: view.canvas,
+        name: "roller.webm",
+        duration: Math.min(cycleMs(), 8000),
+        before: function () {
+          var old = { auto: state.auto, t0: state.autoT0, tween: state.tween.active };
+          state.auto = true;
+          state.tween.active = false;
+          state.autoT0 = performance.now();
+          document.getElementById("auto").checked = true;
+          return old;
+        },
+        after: function (old) {
+          state.auto = old.auto;
+          state.autoT0 = old.t0;
+          state.tween.active = old.tween;
+          document.getElementById("auto").checked = old.auto;
+        },
+        onDone: done,
+        onError: done
+      });
+    });
+  });
+
+  document.getElementById("btn-png").addEventListener("click", function () {
+    K.exportPng(view.canvas, "roller.png");
+  });
+
+  syncSelectedUI();
+  renderCode();
+  K.status("在滚轮上拖动或点击某一行，松开后自动吸附");
+})();</script>
+</body>
+</html>
